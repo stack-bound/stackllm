@@ -32,6 +32,10 @@ type OpenAIWebFlowConfig struct {
 
 	// HTTP client override for testing.
 	HTTPClient *http.Client
+
+	// Optional endpoint overrides for testing.
+	AuthURL  string
+	TokenURL string
 }
 
 func (c *OpenAIWebFlowConfig) port() int {
@@ -46,6 +50,20 @@ func (c *OpenAIWebFlowConfig) httpClient() *http.Client {
 		return c.HTTPClient
 	}
 	return http.DefaultClient
+}
+
+func (c *OpenAIWebFlowConfig) authURL() string {
+	if c.AuthURL != "" {
+		return c.AuthURL
+	}
+	return openaiAuthURL
+}
+
+func (c *OpenAIWebFlowConfig) tokenURL() string {
+	if c.TokenURL != "" {
+		return c.TokenURL
+	}
+	return openaiWebTokenURL
 }
 
 // OpenAIWebFlowSource implements the PKCE authorization code flow with a
@@ -131,7 +149,7 @@ func (s *OpenAIWebFlowSource) Login(ctx context.Context) error {
 		"code_challenge":       {challenge},
 		"code_challenge_method": {"S256"},
 	}
-	authURL := openaiAuthURL + "?" + params.Encode()
+	authURL := s.cfg.authURL() + "?" + params.Encode()
 
 	// Channel to receive the authorization code.
 	codeCh := make(chan string, 1)
@@ -237,7 +255,7 @@ func (s *OpenAIWebFlowSource) Begin(_ context.Context, redirectURI string) (stri
 	}
 	s.mu.Unlock()
 
-	return openaiAuthURL + "?" + params.Encode(), nil
+	return s.cfg.authURL() + "?" + params.Encode(), nil
 }
 
 // Complete finishes a previously started PKCE web flow.
@@ -265,7 +283,7 @@ func (s *OpenAIWebFlowSource) exchangeCode(ctx context.Context, code, verifier, 
 		"code_verifier": {verifier},
 	}
 
-	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), form)
+	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), s.cfg.tokenURL(), form)
 	if err != nil {
 		return fmt.Errorf("auth: openai web exchange: %w", err)
 	}
@@ -290,7 +308,7 @@ func (s *OpenAIWebFlowSource) refresh(ctx context.Context, refreshToken string) 
 		"refresh_token": {refreshToken},
 	}
 
-	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), form)
+	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), s.cfg.tokenURL(), form)
 	if err != nil {
 		return nil, err
 	}

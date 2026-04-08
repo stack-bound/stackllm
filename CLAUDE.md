@@ -173,6 +173,30 @@ SSE events: `token`, `tool_call`, `tool_result`, `done`, `error`
 - Tests: table-driven, `t.Parallel()`, `httptest.NewServer` for HTTP
 - Interfaces defined where consumed, not where implemented
 
+## Implementation rules
+
+These rules are mandatory. Do not skip or shortcut any of them.
+
+### No stubs, no placeholders
+- Every function must be fully implemented. A TODO comment is not an implementation.
+- If a function cannot be implemented yet (e.g. missing dependency), do not mark the phase as complete. Leave it explicitly incomplete and say why.
+- "Fire and forget" goroutines that discard results (e.g. `go Login(ctx)` with no way to get the result back) are stubs. Implement the actual data flow.
+
+### Persist state correctly
+- Any adapter (web, TUI, etc.) that calls `agent.Run()` MUST write the full evolved conversation (assistant messages, tool calls, tool results) back into the session before saving. Passing messages in and ignoring the output is a bug.
+- OAuth token responses that include `expires_in` MUST store and honour the expiry. Storing only the bare access token string and reloading it as never-expiring is a bug.
+
+### Tests must verify behaviour, not just structure
+- Tests must assert on the actual outcomes that matter: persisted data contains expected content, tokens expire when they should, auth flows complete end-to-end.
+- A test that only checks HTTP status codes or "file exists" is insufficient. Test the payload.
+- If a code path cannot be tested (e.g. real external API), write the test anyway with a mock server via `httptest.NewServer` — do not skip it.
+
+### Self-review checklist (run before marking anything complete)
+1. Does every code path actually execute, or are there dead branches / unreachable returns?
+2. Does persisted state (sessions, tokens) round-trip correctly — write then read back and verify contents?
+3. Are all plan requirements implemented, not just the easy ones?
+4. Do tests fail if the feature is broken, or do they pass vacuously?
+
 ## Dependencies
 
 | Package | Purpose |

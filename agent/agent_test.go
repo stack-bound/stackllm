@@ -255,13 +255,76 @@ func TestRun_MaxSteps(t *testing.T) {
 	}
 
 	var gotMaxStepsErr bool
+	var errMessages []conversation.Message
 	for ev := range events {
 		if ev.Type == EventError && ev.Err == ErrMaxStepsReached {
 			gotMaxStepsErr = true
+			errMessages = ev.Messages
 		}
 	}
 	if !gotMaxStepsErr {
 		t.Error("expected ErrMaxStepsReached")
+	}
+	// EventError must carry the partial conversation so callers can persist it.
+	if len(errMessages) == 0 {
+		t.Fatal("expected Messages on ErrMaxStepsReached event")
+	}
+	// Should have: user + (assistant + tool) * 3 steps = 7
+	if len(errMessages) != 7 {
+		t.Errorf("errMessages len = %d, want 7 (user + 3 steps of assistant+tool)", len(errMessages))
+	}
+}
+
+func TestRun_StepErrorCarriesMessages(t *testing.T) {
+	t.Parallel()
+
+	type EchoArgs struct {
+		Text string `json:"text"`
+	}
+	reg := tools.NewRegistry()
+	reg.Register("echo", "echo", func(ctx context.Context, args EchoArgs) (string, error) {
+		return args.Text, nil
+	})
+
+	p := &mockProvider{
+		responses: [][]provider.Event{
+			// Step 1: successful tool call
+			{
+				{Type: provider.EventTypeToolCall, Call: &provider.ToolCall{
+					ID: "c1", Name: "echo", Arguments: `{"text":"a"}`,
+				}},
+				{Type: provider.EventTypeDone},
+			},
+			// Step 2: provider error
+			{
+				{Type: provider.EventTypeError, Err: fmt.Errorf("provider exploded")},
+			},
+		},
+	}
+
+	a := New(p, WithTools(reg), WithMaxSteps(10))
+	events, err := a.Run(context.Background(), []conversation.Message{
+		{Role: conversation.RoleUser, Content: "go"},
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var gotError bool
+	var errMessages []conversation.Message
+	for ev := range events {
+		if ev.Type == EventError {
+			gotError = true
+			errMessages = ev.Messages
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+	// Should have: user + assistant + tool = 3 messages from the successful step.
+	// The failing step's Step() returns the msgs it received (which include step 1's output).
+	if len(errMessages) < 3 {
+		t.Errorf("errMessages len = %d, want at least 3 (partial conversation from before error)", len(errMessages))
 	}
 }
 

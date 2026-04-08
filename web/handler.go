@@ -110,6 +110,10 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 			sse.writeEvent("done", map[string]string{"session_id": sess.ID})
 
 		case agent.EventError:
+			if len(ev.Messages) > 0 {
+				sess.Messages = append([]conversation.Message(nil), ev.Messages...)
+				h.store.Save(context.Background(), sess)
+			}
 			sse.writeEvent("error", map[string]string{"message": ev.Err.Error()})
 		}
 	}

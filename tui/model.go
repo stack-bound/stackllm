@@ -203,6 +203,9 @@ func (m *Model) runAgent() tea.Cmd {
 			case agent.EventComplete:
 				m.session.Messages = append([]conversation.Message(nil), ev.Messages...)
 			case agent.EventError:
+				if len(ev.Messages) > 0 {
+					m.session.Messages = append([]conversation.Message(nil), ev.Messages...)
+				}
 				m.err = ev.Err
 				m.appendOutput(m.errorStyle.Render("Error: "+ev.Err.Error()) + "\n")
 			}

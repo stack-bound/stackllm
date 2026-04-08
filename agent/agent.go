@@ -181,7 +181,7 @@ func (a *Agent) Run(ctx context.Context, msgs []conversation.Message) (<-chan Ev
 			a.opts.hooks.OnToolResult = origOnToolResult
 
 			if err != nil {
-				events <- Event{Type: EventError, Err: err, Step: step}
+				events <- Event{Type: EventError, Err: err, Step: step, Messages: msgs}
 				return
 			}
 
@@ -193,7 +193,7 @@ func (a *Agent) Run(ctx context.Context, msgs []conversation.Message) (<-chan Ev
 			}
 		}
 
-		events <- Event{Type: EventError, Err: ErrMaxStepsReached, Step: a.opts.maxSteps}
+		events <- Event{Type: EventError, Err: ErrMaxStepsReached, Step: a.opts.maxSteps, Messages: msgs}
 	}()
 
 	return events, nil

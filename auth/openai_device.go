@@ -29,6 +29,10 @@ type OpenAIDeviceConfig struct {
 
 	// HTTP client override for testing.
 	HTTPClient *http.Client
+
+	// Optional endpoint overrides for testing.
+	DeviceCodeURL string
+	TokenURL      string
 }
 
 func (c *OpenAIDeviceConfig) httpClient() *http.Client {
@@ -36,6 +40,20 @@ func (c *OpenAIDeviceConfig) httpClient() *http.Client {
 		return c.HTTPClient
 	}
 	return http.DefaultClient
+}
+
+func (c *OpenAIDeviceConfig) deviceCodeURL() string {
+	if c.DeviceCodeURL != "" {
+		return c.DeviceCodeURL
+	}
+	return openaiDeviceCodeURL
+}
+
+func (c *OpenAIDeviceConfig) tokenURL() string {
+	if c.TokenURL != "" {
+		return c.TokenURL
+	}
+	return openaiTokenURL
 }
 
 // OpenAIDeviceSource implements the OpenAI device code OAuth flow.
@@ -93,7 +111,7 @@ func (s *OpenAIDeviceSource) Login(ctx context.Context) error {
 		"audience":  {"https://api.openai.com/v1"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiDeviceCodeURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.deviceCodeURL(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return fmt.Errorf("auth: openai device code request: %w", err)
 	}
@@ -157,7 +175,7 @@ func (s *OpenAIDeviceSource) Login(ctx context.Context) error {
 			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		}
 
-		pollReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiTokenURL, strings.NewReader(pollForm.Encode()))
+		pollReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.tokenURL(), strings.NewReader(pollForm.Encode()))
 		if err != nil {
 			return fmt.Errorf("auth: openai poll request: %w", err)
 		}
@@ -226,7 +244,7 @@ func (s *OpenAIDeviceSource) refresh(ctx context.Context, refreshToken string) (
 		"refresh_token": {refreshToken},
 	}
 
-	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), form)
+	record, err := exchangeOpenAIToken(ctx, s.cfg.httpClient(), s.cfg.tokenURL(), form)
 	if err != nil {
 		return nil, err
 	}

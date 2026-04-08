@@ -54,8 +54,8 @@ func saveOpenAITokenRecord(ctx context.Context, store TokenStore, key string, re
 	return nil
 }
 
-func exchangeOpenAIToken(ctx context.Context, client *http.Client, form url.Values) (*openAITokenRecord, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiTokenURL, strings.NewReader(form.Encode()))
+func exchangeOpenAIToken(ctx context.Context, client *http.Client, tokenURL string, form url.Values) (*openAITokenRecord, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("auth: openai token request: %w", err)
 	}
