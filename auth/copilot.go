@@ -40,6 +40,10 @@ type CopilotConfig struct {
 	// GitHub host. Defaults to "github.com". Override for GHE.
 	Host string
 
+	// PollInterval overrides the default device-flow poll interval (default 5s).
+	// The server-provided interval takes precedence when non-zero.
+	PollInterval time.Duration
+
 	// HTTP client override for testing.
 	HTTPClient *http.Client
 
@@ -47,6 +51,13 @@ type CopilotConfig struct {
 	DeviceCodeURL  string
 	AccessTokenURL string
 	CopilotTokenURL string
+}
+
+func (c *CopilotConfig) pollInterval() time.Duration {
+	if c.PollInterval > 0 {
+		return c.PollInterval
+	}
+	return 5 * time.Second
 }
 
 func (c *CopilotConfig) host() string {
@@ -177,7 +188,7 @@ func (s *CopilotTokenSource) Login(ctx context.Context) error {
 	// Step 2: Poll for authorization.
 	interval := time.Duration(deviceResp.Interval) * time.Second
 	if interval == 0 {
-		interval = 5 * time.Second
+		interval = s.cfg.pollInterval()
 	}
 	deadline := time.Now().Add(time.Duration(deviceResp.ExpiresIn) * time.Second)
 	if deviceResp.ExpiresIn == 0 {

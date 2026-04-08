@@ -1,8 +1,10 @@
 // Command tui demonstrates the Bubbletea interactive terminal agent.
 //
+// Uses the default provider if configured (via go run ./examples/login),
+// otherwise falls back to OPENAI_API_KEY environment variable.
+//
 // Usage:
 //
-//	export OPENAI_API_KEY=sk-...
 //	go run ./examples/tui
 package main
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/stack-bound/stackllm/agent"
 	"github.com/stack-bound/stackllm/auth"
+	"github.com/stack-bound/stackllm/profile"
 	"github.com/stack-bound/stackllm/provider"
 	"github.com/stack-bound/stackllm/session"
 	"github.com/stack-bound/stackllm/tools"
@@ -24,14 +27,13 @@ import (
 type TimeArgs struct{}
 
 func main() {
-	key := os.Getenv("OPENAI_API_KEY")
-	if key == "" {
-		fmt.Fprintln(os.Stderr, "Set OPENAI_API_KEY environment variable")
+	p, err := resolveProvider()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Either run: go run ./examples/login")
+		fmt.Fprintln(os.Stderr, "Or set:    export OPENAI_API_KEY=sk-...")
 		os.Exit(1)
 	}
-
-	// Provider.
-	p := provider.New(provider.OpenAIConfig("gpt-4o", auth.NewStatic(key)))
 
 	// Tools.
 	registry := tools.NewRegistry()
@@ -54,4 +56,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// resolveProvider tries the persisted default first, then OPENAI_API_KEY.
+func resolveProvider() (*provider.OpenAIProvider, error) {
+	mgr := profile.New()
+	p, err := mgr.LoadDefault(context.Background())
+	if err == nil {
+		return p, nil
+	}
+
+	// Fallback: OPENAI_API_KEY environment variable.
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return provider.New(provider.OpenAIConfig("gpt-5.4", auth.NewStatic(key))), nil
+	}
+
+	return nil, fmt.Errorf("no default provider configured and OPENAI_API_KEY not set")
 }

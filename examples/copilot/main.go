@@ -35,8 +35,8 @@ func main() {
 		},
 	}))
 
-	// Provider: Copilot with GPT-4o.
-	p := provider.New(provider.CopilotConfig("gpt-4o", tokenSource))
+	// Provider: Copilot with GPT-5.4.
+	p := provider.New(provider.CopilotConfig("gpt-5.4", tokenSource))
 
 	// Agent.
 	a := agent.New(p,

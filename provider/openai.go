@@ -24,6 +24,7 @@ type Config struct {
 	ExtraHeaders map[string]string // static headers added to every request
 	HTTPClient   *http.Client      // override for testing
 	MaxRetries   int               // default 3; retries on 429 and 5xx
+	BaseBackoff  time.Duration     // base for exponential backoff; default 1s
 }
 
 // OpenAIConfig returns config for the OpenAI API.
@@ -90,6 +91,9 @@ type OpenAIProvider struct {
 func New(cfg Config) *OpenAIProvider {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 3
+	}
+	if cfg.BaseBackoff <= 0 {
+		cfg.BaseBackoff = time.Second
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{
@@ -248,7 +252,7 @@ func (p *OpenAIProvider) doWithRetry(ctx context.Context, url string, body []byt
 	var lastErr error
 	for attempt := 0; attempt < p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			backoff := time.Duration(1<<uint(attempt-1)) * p.cfg.BaseBackoff
 			select {
 			case <-ctx.Done():
 				events <- Event{Type: EventTypeError, Err: ctx.Err()}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stack-bound/stackllm/auth"
 	"github.com/stack-bound/stackllm/conversation"
@@ -131,7 +132,8 @@ func TestOpenAIProvider_RetryOn429(t *testing.T) {
 			}
 			return textResponse(http.StatusOK, "text/event-stream", "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"), nil
 		}),
-		MaxRetries: 3,
+		MaxRetries:  3,
+		BaseBackoff: time.Millisecond,
 	})
 
 	events, err := p.Complete(context.Background(), Request{

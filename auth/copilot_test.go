@@ -53,11 +53,12 @@ func TestCopilotTokenSource_FullFlow(t *testing.T) {
 				t.Fatalf("device callback = %q %q", userCode, verifyURL)
 			}
 		},
-		OnSuccess: func() { successCalled = true },
-		Store:     store,
-		HTTPClient: client,
-		DeviceCodeURL:  "https://mcp.test/login/device/code",
-		AccessTokenURL: "https://mcp.test/login/oauth/access_token",
+		OnSuccess:       func() { successCalled = true },
+		Store:           store,
+		PollInterval:    time.Millisecond,
+		HTTPClient:      client,
+		DeviceCodeURL:   "https://mcp.test/login/device/code",
+		AccessTokenURL:  "https://mcp.test/login/oauth/access_token",
 		CopilotTokenURL: "https://mcp.test/copilot_internal/v2/token",
 	})
 

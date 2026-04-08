@@ -25,7 +25,7 @@ func TestOpenAIDeviceSource_FullFlow(t *testing.T) {
 				"device_code":      "dev-abc",
 				"user_code":        "WXYZ-9999",
 				"verification_uri": "https://openai.com/verify",
-				"interval":         1,
+				"interval":         0,
 				"expires_in":       60,
 			}), nil
 		case "https://test.openai.local/oauth/token":
@@ -56,6 +56,7 @@ func TestOpenAIDeviceSource_FullFlow(t *testing.T) {
 			}
 		},
 		OnSuccess:     func() { successCalled = true },
+		PollInterval:  time.Millisecond,
 		HTTPClient:    client,
 		DeviceCodeURL: "https://test.openai.local/oauth/device/code",
 		TokenURL:      "https://test.openai.local/oauth/token",

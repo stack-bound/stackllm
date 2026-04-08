@@ -27,12 +27,23 @@ type OpenAIDeviceConfig struct {
 	OnPolling func()
 	OnSuccess func()
 
+	// PollInterval overrides the default device-flow poll interval (default 5s).
+	// The server-provided interval takes precedence when non-zero.
+	PollInterval time.Duration
+
 	// HTTP client override for testing.
 	HTTPClient *http.Client
 
 	// Optional endpoint overrides for testing.
 	DeviceCodeURL string
 	TokenURL      string
+}
+
+func (c *OpenAIDeviceConfig) pollInterval() time.Duration {
+	if c.PollInterval > 0 {
+		return c.PollInterval
+	}
+	return 5 * time.Second
 }
 
 func (c *OpenAIDeviceConfig) httpClient() *http.Client {
@@ -151,7 +162,7 @@ func (s *OpenAIDeviceSource) Login(ctx context.Context) error {
 	// Step 2: Poll for token.
 	interval := time.Duration(deviceResp.Interval) * time.Second
 	if interval == 0 {
-		interval = 5 * time.Second
+		interval = s.cfg.pollInterval()
 	}
 	deadline := time.Now().Add(time.Duration(deviceResp.ExpiresIn) * time.Second)
 	if deviceResp.ExpiresIn == 0 {
