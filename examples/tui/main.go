@@ -27,7 +27,8 @@ import (
 type TimeArgs struct{}
 
 func main() {
-	p, err := resolveProvider()
+	mgr := profile.New()
+	p, err := resolveProvider(mgr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Either run: go run ./examples/login")
@@ -49,7 +50,7 @@ func main() {
 
 	// TUI.
 	store := session.NewInMemoryStore()
-	m := tui.New(a, store)
+	m := tui.New(a, store, tui.WithModelLister(mgr))
 
 	prog := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := prog.Run(); err != nil {
@@ -59,8 +60,7 @@ func main() {
 }
 
 // resolveProvider tries the persisted default first, then OPENAI_API_KEY.
-func resolveProvider() (*provider.OpenAIProvider, error) {
-	mgr := profile.New()
+func resolveProvider(mgr *profile.Manager) (*provider.OpenAIProvider, error) {
 	p, err := mgr.LoadDefault(context.Background())
 	if err == nil {
 		return p, nil

@@ -44,7 +44,7 @@ func TestMessage_IsSystem(t *testing.T) {
 	}
 }
 
-func TestMessage_HasToolCalls(t *testing.T) {
+func TestMessage_HasToolUses(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -52,21 +52,89 @@ func TestMessage_HasToolCalls(t *testing.T) {
 		msg  Message
 		want bool
 	}{
-		{"no tool calls", Message{Role: RoleAssistant, Content: "hello"}, false},
-		{"empty tool calls", Message{Role: RoleAssistant, ToolCalls: []ToolCall{}}, false},
-		{"with tool calls", Message{
-			Role: RoleAssistant,
-			ToolCalls: []ToolCall{
-				{ID: "1", Name: "read_file", Arguments: `{"path":"/tmp/foo"}`},
+		{
+			name: "no blocks",
+			msg:  Message{Role: RoleAssistant},
+			want: false,
+		},
+		{
+			name: "text only",
+			msg: Message{
+				Role:   RoleAssistant,
+				Blocks: []Block{{Type: BlockText, Text: "hello"}},
 			},
-		}, true},
+			want: false,
+		},
+		{
+			name: "with tool use",
+			msg: Message{
+				Role: RoleAssistant,
+				Blocks: []Block{
+					{Type: BlockText, Text: "let me check"},
+					{Type: BlockToolUse, ToolCallID: "1", ToolName: "read_file", ToolArgsJSON: `{"path":"/tmp/foo"}`},
+				},
+			},
+			want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tt.msg.HasToolCalls(); got != tt.want {
-				t.Errorf("HasToolCalls() = %v, want %v", got, tt.want)
+			if got := tt.msg.HasToolUses(); got != tt.want {
+				t.Errorf("HasToolUses() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestMessage_InterleavedBlocks asserts the Blocks helpers return the
+// expected subsets of an assistant message whose turn interleaves
+// thinking, text, and tool_use blocks — the critical Phase 1 goal.
+func TestMessage_InterleavedBlocks(t *testing.T) {
+	t.Parallel()
+
+	msg := Message{
+		Role: RoleAssistant,
+		Blocks: []Block{
+			{Type: BlockThinking, Text: "planning"},
+			{Type: BlockText, Text: "Let me check."},
+			{Type: BlockToolUse, ToolCallID: "c1", ToolName: "read_file", ToolArgsJSON: `{"p":"a"}`},
+			{Type: BlockThinking, Text: "found it"},
+			{Type: BlockToolUse, ToolCallID: "c2", ToolName: "grep", ToolArgsJSON: `{"q":"b"}`},
+			{Type: BlockThinking, Text: "analyzing"},
+			{Type: BlockText, Text: "The bug is X."},
+		},
+	}
+
+	if got, want := msg.TextContent(), "Let me check.The bug is X."; got != want {
+		t.Errorf("TextContent() = %q, want %q", got, want)
+	}
+	if got, want := msg.ThinkingText(), "planningfound itanalyzing"; got != want {
+		t.Errorf("ThinkingText() = %q, want %q", got, want)
+	}
+
+	uses := msg.ToolUses()
+	if len(uses) != 2 {
+		t.Fatalf("ToolUses() len = %d, want 2", len(uses))
+	}
+	if uses[0].ToolName != "read_file" || uses[1].ToolName != "grep" {
+		t.Errorf("ToolUses order wrong: %q, %q", uses[0].ToolName, uses[1].ToolName)
+	}
+	if !msg.HasToolUses() {
+		t.Error("HasToolUses() should be true")
+	}
+
+	// Block order must be preserved verbatim.
+	wantTypes := []BlockType{
+		BlockThinking, BlockText, BlockToolUse,
+		BlockThinking, BlockToolUse, BlockThinking, BlockText,
+	}
+	if len(msg.Blocks) != len(wantTypes) {
+		t.Fatalf("blocks len = %d, want %d", len(msg.Blocks), len(wantTypes))
+	}
+	for i, want := range wantTypes {
+		if msg.Blocks[i].Type != want {
+			t.Errorf("Blocks[%d].Type = %q, want %q", i, msg.Blocks[i].Type, want)
+		}
 	}
 }

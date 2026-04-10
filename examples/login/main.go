@@ -293,7 +293,7 @@ func menuSetDefault(ctx context.Context, mgr *profile.Manager, scanner *bufio.Sc
 	}
 
 	selected := models[idx-1]
-	if err := mgr.SetDefault(selected.String()); err != nil {
+	if err := mgr.SetDefaultModel(selected); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}

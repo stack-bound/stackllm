@@ -39,26 +39,30 @@ func (m *mockProvider) Complete(_ context.Context, _ provider.Request) (<-chan p
 	return ch, nil
 }
 
-func (m *mockProvider) Models(_ context.Context) ([]string, error) { return nil, nil }
+func (m *mockProvider) Models(_ context.Context) ([]provider.ModelMeta, error) { return nil, nil }
+
+// textBlockEvents returns the canonical block event triplet a mock
+// provider emits for a single text block with the given content.
+func textBlockEvents(text string) []provider.Event {
+	blk := conversation.Block{Type: conversation.BlockText, Text: text}
+	return []provider.Event{
+		{Type: provider.EventTypeBlockStart, BlockType: conversation.BlockText},
+		{Type: provider.EventTypeBlockDelta, BlockType: conversation.BlockText, Content: text},
+		{Type: provider.EventTypeBlockEnd, BlockType: conversation.BlockText, Block: &blk},
+	}
+}
 
 func TestHandler_Chat(t *testing.T) {
 	t.Parallel()
 
-	p := &mockProvider{
-		responses: [][]provider.Event{
-			{
-				{Type: provider.EventTypeToken, Content: "Hello"},
-				{Type: provider.EventTypeToken, Content: " there"},
-				{Type: provider.EventTypeDone},
-			},
-		},
-	}
+	events := append(textBlockEvents("Hello there"), provider.Event{Type: provider.EventTypeDone})
+	p := &mockProvider{responses: [][]provider.Event{events}}
 
 	a := agent.New(p)
 	store := session.NewInMemoryStore()
 	h := NewHandler(a, store)
 
-	body := strings.NewReader(`{"message":"hi"}`)
+	body := strings.NewReader(`{"message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}`)
 	req := httptest.NewRequest("POST", "/chat", body)
 	w := httptest.NewRecorder()
 
@@ -70,27 +74,39 @@ func TestHandler_Chat(t *testing.T) {
 
 	// Parse SSE events.
 	scanner := bufio.NewScanner(strings.NewReader(w.Body.String()))
-	var events []string
+	var eventNames []string
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "event: ") {
-			events = append(events, strings.TrimPrefix(line, "event: "))
+			eventNames = append(eventNames, strings.TrimPrefix(line, "event: "))
 		}
 	}
 
-	// Should have token events and a done event.
-	hasToken := false
+	// Should have block events and a done event.
+	hasStart := false
+	hasDelta := false
+	hasEnd := false
 	hasDone := false
-	for _, e := range events {
-		if e == "token" {
-			hasToken = true
-		}
-		if e == "done" {
+	for _, e := range eventNames {
+		switch e {
+		case "block_start":
+			hasStart = true
+		case "block_delta":
+			hasDelta = true
+		case "block_end":
+			hasEnd = true
+		case "done":
 			hasDone = true
 		}
 	}
-	if !hasToken {
-		t.Error("expected token events")
+	if !hasStart {
+		t.Error("expected block_start events")
+	}
+	if !hasDelta {
+		t.Error("expected block_delta events")
+	}
+	if !hasEnd {
+		t.Error("expected block_end events")
 	}
 	if !hasDone {
 		t.Error("expected done event")
@@ -100,20 +116,14 @@ func TestHandler_Chat(t *testing.T) {
 func TestHandler_Chat_PersistsAssistantMessage(t *testing.T) {
 	t.Parallel()
 
-	p := &mockProvider{
-		responses: [][]provider.Event{
-			{
-				{Type: provider.EventTypeToken, Content: "Hello"},
-				{Type: provider.EventTypeDone},
-			},
-		},
-	}
+	events := append(textBlockEvents("Hello"), provider.Event{Type: provider.EventTypeDone})
+	p := &mockProvider{responses: [][]provider.Event{events}}
 
 	a := agent.New(p)
 	store := session.NewInMemoryStore()
 	h := NewHandler(a, store)
 
-	body := strings.NewReader(`{"message":"hi"}`)
+	body := strings.NewReader(`{"message":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}`)
 	req := httptest.NewRequest("POST", "/chat", body)
 	w := httptest.NewRecorder()
 
@@ -146,8 +156,11 @@ func TestHandler_Chat_PersistsAssistantMessage(t *testing.T) {
 	if sess.Messages[1].Role != conversation.RoleAssistant {
 		t.Fatalf("assistant role = %q", sess.Messages[1].Role)
 	}
-	if sess.Messages[1].Content != "Hello" {
-		t.Fatalf("assistant content = %q", sess.Messages[1].Content)
+	if got := sess.Messages[1].TextContent(); got != "Hello" {
+		t.Fatalf("assistant text = %q", got)
+	}
+	if len(sess.Messages[1].Blocks) != 1 || sess.Messages[1].Blocks[0].Type != conversation.BlockText {
+		t.Fatalf("assistant blocks = %+v", sess.Messages[1].Blocks)
 	}
 }
 
@@ -211,8 +224,28 @@ func TestHandler_GetSession(t *testing.T) {
 
 	var result map[string]any
 	json.NewDecoder(w.Body).Decode(&result)
-	if result["ID"] != sess.ID {
-		t.Errorf("ID = %v, want %q", result["ID"], sess.ID)
+	if result["id"] != sess.ID {
+		t.Errorf("id = %v, want %q", result["id"], sess.ID)
+	}
+}
+
+func TestHandler_Chat_LegacyStringMessageStillAccepted(t *testing.T) {
+	t.Parallel()
+
+	events := append(textBlockEvents("Hello"), provider.Event{Type: provider.EventTypeDone})
+	p := &mockProvider{responses: [][]provider.Event{events}}
+
+	a := agent.New(p)
+	store := session.NewInMemoryStore()
+	h := NewHandler(a, store)
+
+	req := httptest.NewRequest("POST", "/chat", strings.NewReader(`{"message":"hi"}`))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
 }
 

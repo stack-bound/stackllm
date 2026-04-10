@@ -1,26 +1,33 @@
 package session
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"time"
 
 	"github.com/stack-bound/stackllm/conversation"
 )
 
 // Session holds conversation history and arbitrary KV state for an agent run.
+//
+// Name, ProjectPath, and Model are surfaced as dedicated columns by
+// SQLiteStore so List can return them without loading the full
+// conversation; they are optional and may be left zero by embedders
+// that don't need them.
 type Session struct {
-	ID       string
-	Messages []conversation.Message
-	State    map[string]any
-	Created  time.Time
-	Updated  time.Time
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name,omitempty"`
+	ProjectPath string                 `json:"project_path,omitempty"`
+	Model       string                 `json:"model,omitempty"`
+	Messages    []conversation.Message `json:"messages"`
+	State       map[string]any         `json:"state"`
+	Created     time.Time              `json:"created"`
+	Updated     time.Time              `json:"updated"`
 }
 
-// New creates a new session with a random ID.
+// New creates a new session with a fresh UUIDv7 ID (via
+// conversation.NewID, which is the single ID factory for the library).
 func New() *Session {
 	return &Session{
-		ID:      generateID(),
+		ID:      conversation.NewID(),
 		State:   make(map[string]any),
 		Created: time.Now(),
 		Updated: time.Now(),
@@ -29,6 +36,7 @@ func New() *Session {
 
 // AppendMessage adds a message and updates the timestamp.
 func (s *Session) AppendMessage(msg conversation.Message) {
+	conversation.EnsureMessageIDs(&msg)
 	s.Messages = append(s.Messages, msg)
 	s.Updated = time.Now()
 }
@@ -48,8 +56,3 @@ func (s *Session) GetState(key string) (any, bool) {
 	return v, ok
 }
 
-func generateID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}

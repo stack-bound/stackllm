@@ -22,11 +22,32 @@ type ProviderSettings struct {
 	APIVersion string `json:"api_version,omitempty"` // Azure
 }
 
+// RecentModel records a model the user has previously selected, so
+// pickers can surface their most recent choices ahead of the full
+// catalogue. The order in Config.RecentModels is most-recent-first.
+type RecentModel struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
 // Config holds user preferences persisted to disk.
 type Config struct {
-	DefaultProvider string                      `json:"default_provider,omitempty"`
-	DefaultModel    string                      `json:"default_model,omitempty"`
-	Providers       map[string]ProviderSettings `json:"providers,omitempty"`
+	DefaultProvider string `json:"default_provider,omitempty"`
+	DefaultModel    string `json:"default_model,omitempty"`
+
+	// DefaultEndpoint is the API path the default model uses. Empty
+	// means the provider default (/chat/completions). Set to
+	// "/responses" for Copilot models that are only reachable via the
+	// Responses API. Older configs without this field default to
+	// chat completions, preserving prior behaviour.
+	DefaultEndpoint string `json:"default_endpoint,omitempty"`
+
+	Providers map[string]ProviderSettings `json:"providers,omitempty"`
+
+	// RecentModels is the most-recent-first list of models the user
+	// has selected. Capped to a small fixed size by the writer.
+	RecentModels []RecentModel `json:"recent_models,omitempty"`
 }
 
 // Store reads and writes Config to a JSON file.

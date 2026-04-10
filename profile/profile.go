@@ -65,6 +65,16 @@ type ProviderStatus struct {
 type ModelInfo struct {
 	Provider string // e.g. "copilot"
 	Model    string // e.g. "gpt-5.4"
+
+	// Endpoint is the API path the model is reachable on. The empty
+	// string means the provider's default (/chat/completions).
+	// provider.EndpointResponses ("/responses") is used for Copilot
+	// models that are not accessible via /chat/completions, e.g.
+	// gpt-5.4-mini and gpt-5.x-codex.
+	//
+	// Populated by ListAllModels from each model's supported_endpoints
+	// metadata. LoadProviderForModel routes the request accordingly.
+	Endpoint string
 }
 
 // String returns "provider/model" format.
@@ -264,22 +274,92 @@ func (m *Manager) isAuthenticated(ctx context.Context, name string, cfg *config.
 	}
 }
 
-// ListModels returns available model names for a single provider.
-// The provider must be authenticated.
+// ListModels returns available chat model IDs for a single provider.
+// The provider must be authenticated. Embedding-only models are
+// filtered out.
 func (m *Manager) ListModels(ctx context.Context, providerName string) ([]string, error) {
-	p, err := m.buildProvider(ctx, providerName, "")
+	infos, err := m.listModelsForProvider(ctx, providerName)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(infos))
+	for i, info := range infos {
+		out[i] = info.Model
+	}
+	return out, nil
+}
+
+// listModelsForProvider returns ModelInfo entries for a single provider's
+// chat-capable models, with each entry's Endpoint populated from the
+// model's metadata. Embedding-only models are filtered out.
+func (m *Manager) listModelsForProvider(ctx context.Context, providerName string) ([]ModelInfo, error) {
+	p, err := m.buildProvider(ctx, providerName, "", provider.EndpointChatCompletions)
 	if err != nil {
 		return nil, fmt.Errorf("profile: build provider for models: %w", err)
 	}
-	models, err := p.Models(ctx)
+	metas, err := p.Models(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("profile: list models for %s: %w", providerName, err)
 	}
-	return models, nil
+
+	out := make([]ModelInfo, 0, len(metas))
+	for _, meta := range metas {
+		if meta.Type == "embeddings" {
+			continue
+		}
+		// Drop entries the upstream has explicitly disabled in its
+		// model picker (Copilot routers, pinned legacy versions,
+		// internal load-test models, etc.). Providers that don't
+		// expose model_picker_enabled (OpenAI, Gemini, Ollama)
+		// leave the field nil and are unaffected.
+		if meta.ModelPickerEnabled != nil && !*meta.ModelPickerEnabled {
+			continue
+		}
+		out = append(out, ModelInfo{
+			Provider: providerName,
+			Model:    meta.ID,
+			Endpoint: endpointForMeta(meta),
+		})
+	}
+	return out, nil
+}
+
+// endpointForMeta selects the API endpoint a model should be called on,
+// based on its SupportedEndpoints metadata.
+//
+// Rules:
+//   - SupportedEndpoints absent or empty → default (chat completions).
+//     Most providers (OpenAI, Gemini, Ollama) and many legacy Copilot
+//     models do not expose this metadata.
+//   - Contains "/chat/completions" → default (chat completions). Models
+//     with both endpoints prefer the legacy path for compatibility.
+//   - Contains "/responses" but not "/chat/completions" → responses.
+//     This is the case for gpt-5.4-mini and gpt-5.x-codex on Copilot.
+//   - Otherwise (some other unknown endpoint set) → default and let
+//     the upstream API surface a clear error.
+func endpointForMeta(meta provider.ModelMeta) string {
+	if len(meta.SupportedEndpoints) == 0 {
+		return provider.EndpointChatCompletions
+	}
+	hasResponses := false
+	for _, ep := range meta.SupportedEndpoints {
+		if ep == "/chat/completions" {
+			return provider.EndpointChatCompletions
+		}
+		if ep == "/responses" {
+			hasResponses = true
+		}
+	}
+	if hasResponses {
+		return provider.EndpointResponses
+	}
+	return provider.EndpointChatCompletions
 }
 
 // ListAllModels queries all authenticated providers for models and returns
-// a combined list sorted by provider then model name. Errors from individual
+// a combined list sorted by provider then model name. Each ModelInfo has
+// its Endpoint populated from the upstream metadata so callers can pass
+// it to LoadProviderForModel without re-querying. Errors from individual
 // providers are skipped (e.g. Ollama offline), not fatal.
 func (m *Manager) ListAllModels(ctx context.Context) ([]ModelInfo, error) {
 	statuses, err := m.Status(ctx)
@@ -287,13 +367,8 @@ func (m *Manager) ListAllModels(ctx context.Context) ([]ModelInfo, error) {
 		return nil, err
 	}
 
-	type result struct {
-		provider string
-		models   []string
-	}
-
 	var wg sync.WaitGroup
-	ch := make(chan result, len(statuses))
+	ch := make(chan []ModelInfo, len(statuses))
 
 	for _, s := range statuses {
 		if !s.Authenticated {
@@ -302,12 +377,12 @@ func (m *Manager) ListAllModels(ctx context.Context) ([]ModelInfo, error) {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			models, err := m.ListModels(ctx, name)
+			infos, err := m.listModelsForProvider(ctx, name)
 			if err != nil {
 				// Skip providers that fail (e.g. offline Ollama).
 				return
 			}
-			ch <- result{provider: name, models: models}
+			ch <- infos
 		}(s.Name)
 	}
 
@@ -315,10 +390,8 @@ func (m *Manager) ListAllModels(ctx context.Context) ([]ModelInfo, error) {
 	close(ch)
 
 	var all []ModelInfo
-	for r := range ch {
-		for _, model := range r.models {
-			all = append(all, ModelInfo{Provider: r.provider, Model: model})
-		}
+	for batch := range ch {
+		all = append(all, batch...)
 	}
 
 	sort.Slice(all, func(i, j int) bool {
@@ -331,33 +404,113 @@ func (m *Manager) ListAllModels(ctx context.Context) ([]ModelInfo, error) {
 	return all, nil
 }
 
+// RecentModels returns the persisted list of models the user has
+// recently selected, most-recent-first. Returns an empty slice when
+// no recents have been recorded yet (not an error). The Endpoint
+// field is preserved so callers can pass entries straight to
+// LoadProviderForModel.
+func (m *Manager) RecentModels(ctx context.Context) ([]ModelInfo, error) {
+	cfg, err := m.configStore.Load()
+	if err != nil {
+		return nil, fmt.Errorf("profile: load config for recent models: %w", err)
+	}
+	out := make([]ModelInfo, 0, len(cfg.RecentModels))
+	for _, r := range cfg.RecentModels {
+		if r.Provider == "" || r.Model == "" {
+			continue
+		}
+		out = append(out, ModelInfo{
+			Provider: r.Provider,
+			Model:    r.Model,
+			Endpoint: r.Endpoint,
+		})
+	}
+	_ = ctx // config is local
+	return out, nil
+}
+
+// TrackRecentModel pushes the supplied model to the front of the
+// recent-models list and dedupes any prior occurrence by
+// provider+model. The list is unbounded — every model the user has
+// ever selected is retained, with the most recent at the top.
+// Persists the result.
+//
+// Endpoint is overwritten when the same provider/model is re-added,
+// so a model that has been routed via /responses on its most recent
+// use will retain that routing for the next session.
+func (m *Manager) TrackRecentModel(ctx context.Context, info ModelInfo) error {
+	if info.Provider == "" || info.Model == "" {
+		return fmt.Errorf("profile: TrackRecentModel: provider and model required")
+	}
+	cfg, err := m.configStore.Load()
+	if err != nil {
+		return fmt.Errorf("profile: load config for track recent: %w", err)
+	}
+
+	entry := config.RecentModel{
+		Provider: info.Provider,
+		Model:    info.Model,
+		Endpoint: info.Endpoint,
+	}
+
+	updated := make([]config.RecentModel, 0, len(cfg.RecentModels)+1)
+	updated = append(updated, entry)
+	for _, r := range cfg.RecentModels {
+		if r.Provider == entry.Provider && r.Model == entry.Model {
+			continue
+		}
+		updated = append(updated, r)
+	}
+	cfg.RecentModels = updated
+
+	if err := m.configStore.Save(cfg); err != nil {
+		return fmt.Errorf("profile: save recent model: %w", err)
+	}
+	_ = ctx // config is local
+	return nil
+}
+
 // SetDefault parses "provider/model" format and persists the choice.
+//
+// The persisted endpoint is cleared (defaults to chat completions on
+// load). Use SetDefaultModel to persist a model that requires a
+// non-default endpoint such as /responses.
 func (m *Manager) SetDefault(providerSlashModel string) error {
 	parts := strings.SplitN(providerSlashModel, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return fmt.Errorf("profile: invalid default format %q, expected provider/model", providerSlashModel)
 	}
+	return m.SetDefaultModel(ModelInfo{Provider: parts[0], Model: parts[1]})
+}
 
-	providerName, model := parts[0], parts[1]
+// SetDefaultModel persists provider, model, and endpoint from a ModelInfo.
+// This is the preferred entry point for code that already has the
+// endpoint metadata in hand (e.g. interactive pickers calling
+// ListAllModels) — it preserves the endpoint so LoadDefault routes
+// requests correctly on the next run.
+func (m *Manager) SetDefaultModel(info ModelInfo) error {
+	if info.Provider == "" || info.Model == "" {
+		return fmt.Errorf("profile: SetDefaultModel: provider and model required")
+	}
 
-	// Validate the provider name.
 	valid := false
 	for _, p := range allProviders {
-		if p == providerName {
+		if p == info.Provider {
 			valid = true
 			break
 		}
 	}
 	if !valid {
-		return fmt.Errorf("profile: unknown provider %q", providerName)
+		return fmt.Errorf("profile: unknown provider %q", info.Provider)
 	}
 
 	cfg, err := m.configStore.Load()
 	if err != nil {
 		return fmt.Errorf("profile: load config for set default: %w", err)
 	}
-	cfg.DefaultProvider = providerName
-	cfg.DefaultModel = model
+	cfg.DefaultProvider = info.Provider
+	cfg.DefaultModel = info.Model
+	cfg.DefaultEndpoint = info.Endpoint
 	if err := m.configStore.Save(cfg); err != nil {
 		return fmt.Errorf("profile: save default: %w", err)
 	}
@@ -365,6 +518,9 @@ func (m *Manager) SetDefault(providerSlashModel string) error {
 }
 
 // LoadDefault returns a ready-to-use provider from the persisted default config.
+// Honours the persisted DefaultEndpoint so a default of e.g.
+// copilot/gpt-5.4-mini built via SetDefaultModel correctly routes to
+// /responses on the next run.
 func (m *Manager) LoadDefault(ctx context.Context) (*provider.OpenAIProvider, error) {
 	cfg, err := m.configStore.Load()
 	if err != nil {
@@ -373,19 +529,30 @@ func (m *Manager) LoadDefault(ctx context.Context) (*provider.OpenAIProvider, er
 	if cfg.DefaultProvider == "" || cfg.DefaultModel == "" {
 		return nil, fmt.Errorf("profile: no default provider/model set (run: go run ./examples/login)")
 	}
-	return m.LoadProvider(ctx, cfg.DefaultProvider, cfg.DefaultModel)
+	return m.LoadProviderForModel(ctx, ModelInfo{
+		Provider: cfg.DefaultProvider,
+		Model:    cfg.DefaultModel,
+		Endpoint: cfg.DefaultEndpoint,
+	})
 }
 
-// LoadProvider returns a ready-to-use provider for the given name and model.
+// LoadProvider returns a ready-to-use provider for the given name and
+// model on the provider's default endpoint (/chat/completions). Use
+// LoadProviderForModel when you need to target /responses for a Copilot
+// responses-only model.
 func (m *Manager) LoadProvider(ctx context.Context, providerName, model string) (*provider.OpenAIProvider, error) {
-	p, err := m.buildProvider(ctx, providerName, model)
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
+	return m.buildProvider(ctx, providerName, model, provider.EndpointChatCompletions)
 }
 
-func (m *Manager) buildProvider(ctx context.Context, providerName, model string) (*provider.OpenAIProvider, error) {
+// LoadProviderForModel returns a ready-to-use provider configured for
+// the supplied ModelInfo, including its Endpoint. This is the entry
+// point that interactive pickers should use after ListAllModels —
+// it correctly routes Copilot responses-only models to /responses.
+func (m *Manager) LoadProviderForModel(ctx context.Context, info ModelInfo) (*provider.OpenAIProvider, error) {
+	return m.buildProvider(ctx, info.Provider, info.Model, info.Endpoint)
+}
+
+func (m *Manager) buildProvider(ctx context.Context, providerName, model, endpoint string) (*provider.OpenAIProvider, error) {
 	switch providerName {
 	case ProviderOpenAI:
 		key, err := m.authStore.Load(ctx, keyOpenAI)
@@ -394,6 +561,7 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model string)
 		}
 		ts := auth.NewStatic(key)
 		cfg := provider.OpenAIConfig(model, ts)
+		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient
 		}
@@ -410,6 +578,7 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model string)
 		})
 		ts := auth.NewCachingSource(src)
 		cfg := provider.CopilotConfig(model, ts)
+		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient
 		}
@@ -422,6 +591,7 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model string)
 		}
 		ts := auth.NewStatic(key)
 		cfg := provider.GeminiConfig(model, ts)
+		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient
 		}
@@ -439,6 +609,7 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model string)
 			}
 		}
 		cfg := provider.OllamaConfig(baseURL, model)
+		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient
 		}

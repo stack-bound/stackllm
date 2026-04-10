@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/stack-bound/stackllm/agent"
 	"github.com/stack-bound/stackllm/conversation"
+	"github.com/stack-bound/stackllm/profile"
+	"github.com/stack-bound/stackllm/provider"
 	"github.com/stack-bound/stackllm/session"
 )
 
@@ -23,7 +26,52 @@ const (
 	stateRunning
 	stateToolCall
 	stateError
+	stateCommandMenu
+	stateModelLoading
+	stateModelPicker
 )
+
+// ModelLister is the subset of profile.Manager that the TUI needs to
+// support the /models slash command. Implementing this interface lets
+// callers provide their own model source (e.g. for tests).
+//
+// RecentModels and TrackRecentModel back the "recently used" section
+// at the top of the picker. RecentModels returns the persisted MRU
+// list (most recent first); TrackRecentModel is called after a
+// successful switch so the next session can offer the same model
+// again without scrolling.
+type ModelLister interface {
+	ListAllModels(ctx context.Context) ([]profile.ModelInfo, error)
+	LoadProviderForModel(ctx context.Context, info profile.ModelInfo) (*provider.OpenAIProvider, error)
+	RecentModels(ctx context.Context) ([]profile.ModelInfo, error)
+	TrackRecentModel(ctx context.Context, info profile.ModelInfo) error
+}
+
+// Option configures a Model.
+type Option func(*Model)
+
+// WithModelLister injects a ModelLister so the /models command can list
+// available models and switch the agent to a different provider/model
+// at runtime.
+func WithModelLister(l ModelLister) Option {
+	return func(m *Model) { m.modelLister = l }
+}
+
+// modelsLoadedMsg is delivered after an async model list has finished.
+// recentCount is the number of leading entries in models that came
+// from the recent-used list (already deduped against the full list).
+type modelsLoadedMsg struct {
+	models      []profile.ModelInfo
+	recentCount int
+	err         error
+}
+
+// modelSwitchedMsg is delivered after an async provider switch.
+type modelSwitchedMsg struct {
+	provider provider.Provider
+	info     profile.ModelInfo
+	err      error
+}
 
 // agentEventMsg wraps agent events for the Bubbletea update loop.
 type agentEventMsg struct {
@@ -48,11 +96,25 @@ type Model struct {
 	height   int
 	cancel   context.CancelFunc
 
+	// Slash command popup state.
+	cmdFiltered []Command
+	cmdCursor   int
+
+	// Model picker state. modelRecentCount is the number of leading
+	// entries in models that came from the recent-used list, used to
+	// render a divider between the "recent" section and the rest.
+	models           []profile.ModelInfo
+	modelCursor      int
+	modelRecentCount int
+	modelLister      ModelLister
+
 	// Styles
 	userStyle      lipgloss.Style
 	assistantStyle lipgloss.Style
 	toolStyle      lipgloss.Style
 	errorStyle     lipgloss.Style
+	menuStyle      lipgloss.Style
+	menuCursorStyle lipgloss.Style
 }
 
 const (
@@ -62,10 +124,13 @@ const (
 
 	// maxInputHeight is the maximum number of rows the textarea can grow to.
 	maxInputHeight = 8
+
+	// maxModelPickerVisible bounds the rendered model list height.
+	maxModelPickerVisible = 10
 )
 
 // New creates a new TUI Model.
-func New(a *agent.Agent, store session.SessionStore) *Model {
+func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message..."
 	ta.Prompt = ""
@@ -80,19 +145,25 @@ func New(a *agent.Agent, store session.SessionStore) *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 
-	return &Model{
-		agent:          a,
-		session:        session.New(),
-		store:          store,
-		textarea:       ta,
-		viewport:       vp,
-		spinner:        sp,
-		state:          stateIdle,
-		userStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
-		assistantStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
-		toolStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
-		errorStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true),
+	m := &Model{
+		agent:           a,
+		session:         session.New(),
+		store:           store,
+		textarea:        ta,
+		viewport:        vp,
+		spinner:         sp,
+		state:           stateIdle,
+		userStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
+		assistantStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
+		toolStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
+		errorStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true),
+		menuStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
+		menuCursorStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Init implements tea.Model.
@@ -114,28 +185,88 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case tea.KeyCtrlJ: // Shift+Enter sends \n (linefeed) in many terminals
-			m.textarea.InsertString("\n")
-			skipTextarea = true
+			if m.state == stateIdle || m.state == stateCommandMenu {
+				m.textarea.InsertString("\n")
+				skipTextarea = true
+			}
+		case tea.KeyEsc:
+			switch m.state {
+			case stateCommandMenu:
+				m.textarea.Reset()
+				m.cmdFiltered = nil
+				m.cmdCursor = 0
+				m.state = stateIdle
+				skipTextarea = true
+			case stateModelPicker:
+				m.state = stateIdle
+				skipTextarea = true
+			case stateModelLoading:
+				// allow cancel of loading by returning to idle
+				m.state = stateIdle
+				skipTextarea = true
+			}
+		case tea.KeyUp:
+			if m.state == stateCommandMenu {
+				if m.cmdCursor > 0 {
+					m.cmdCursor--
+				}
+				skipTextarea = true
+			}
+			if m.state == stateModelPicker {
+				if m.modelCursor > 0 {
+					m.modelCursor--
+				}
+				skipTextarea = true
+			}
+		case tea.KeyDown:
+			if m.state == stateCommandMenu {
+				if m.cmdCursor < len(m.cmdFiltered)-1 {
+					m.cmdCursor++
+				}
+				skipTextarea = true
+			}
+			if m.state == stateModelPicker {
+				if m.modelCursor < len(m.models)-1 {
+					m.modelCursor++
+				}
+				skipTextarea = true
+			}
 		case tea.KeyEnter:
 			if msg.Alt {
 				break // pass Alt+Enter to textarea for newline insertion
 			}
 			skipTextarea = true // consume plain Enter, don't let textarea add a newline
-			if m.state == stateRunning {
-				break
+			switch m.state {
+			case stateRunning, stateToolCall, stateModelLoading:
+				// ignore Enter while busy
+			case stateCommandMenu:
+				if len(m.cmdFiltered) > 0 {
+					selected := m.cmdFiltered[m.cmdCursor]
+					m.textarea.Reset()
+					m.cmdFiltered = nil
+					m.cmdCursor = 0
+					cmds = append(cmds, m.executeCommand(selected))
+				}
+			case stateModelPicker:
+				if len(m.models) > 0 {
+					selected := m.models[m.modelCursor]
+					m.state = stateModelLoading
+					cmds = append(cmds, m.switchModel(selected))
+				}
+			default:
+				input := strings.TrimSpace(m.textarea.Value())
+				if input == "" {
+					break
+				}
+				m.textarea.Reset()
+				m.appendOutput(m.userStyle.Render("You: ") + input + "\n\n")
+				m.session.AppendMessage(conversation.Message{
+					Role:   conversation.RoleUser,
+					Blocks: []conversation.Block{{Type: conversation.BlockText, Text: input}},
+				})
+				m.state = stateRunning
+				cmds = append(cmds, m.runAgent())
 			}
-			input := strings.TrimSpace(m.textarea.Value())
-			if input == "" {
-				break
-			}
-			m.textarea.Reset()
-			m.appendOutput(m.userStyle.Render("You: ") + input + "\n\n")
-			m.session.AppendMessage(conversation.Message{
-				Role:    conversation.RoleUser,
-				Content: input,
-			})
-			m.state = stateRunning
-			cmds = append(cmds, m.runAgent())
 		}
 
 	case tea.WindowSizeMsg:
@@ -155,7 +286,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case spinner.TickMsg:
-		if m.state == stateRunning || m.state == stateToolCall {
+		if m.state == stateRunning || m.state == stateToolCall || m.state == stateModelLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
@@ -170,12 +301,67 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.store != nil {
 			m.store.Save(context.Background(), m.session)
 		}
+
+	case modelsLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = stateError
+			m.appendOutput(m.errorStyle.Render("Error loading models: "+msg.err.Error()) + "\n\n")
+			break
+		}
+		m.models = msg.models
+		m.modelRecentCount = msg.recentCount
+		m.modelCursor = 0
+		if len(m.models) == 0 {
+			m.appendOutput(m.toolStyle.Render("No models available — authenticate a provider first.") + "\n\n")
+			m.state = stateIdle
+			break
+		}
+		m.state = stateModelPicker
+
+	case modelSwitchedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = stateError
+			m.appendOutput(m.errorStyle.Render("Error switching model: "+msg.err.Error()) + "\n\n")
+			break
+		}
+		m.agent.SetProvider(msg.provider)
+		m.agent.SetModel(msg.info.Model)
+		// Persist the selection to the recent-models list so it
+		// surfaces at the top of the picker next time. Best effort:
+		// an error here should not block the switch.
+		if m.modelLister != nil {
+			if err := m.modelLister.TrackRecentModel(context.Background(), msg.info); err != nil {
+				m.appendOutput(m.errorStyle.Render("Warning: failed to record recent model: "+err.Error()) + "\n")
+			}
+		}
+		m.appendOutput(m.toolStyle.Render("Switched to "+msg.info.String()) + "\n\n")
+		m.state = stateIdle
 	}
 
 	var cmd tea.Cmd
-	if !skipTextarea {
+	if !skipTextarea && m.state != stateModelPicker && m.state != stateModelLoading {
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
+
+		// After the textarea consumes the keypress, decide whether to
+		// enter or leave the slash command menu based on the new value.
+		if _, ok := msg.(tea.KeyMsg); ok {
+			val := m.textarea.Value()
+			switch {
+			case strings.HasPrefix(val, "/") && (m.state == stateIdle || m.state == stateCommandMenu):
+				m.cmdFiltered = filterCommands(val)
+				if m.cmdCursor >= len(m.cmdFiltered) {
+					m.cmdCursor = 0
+				}
+				m.state = stateCommandMenu
+			case m.state == stateCommandMenu:
+				m.cmdFiltered = nil
+				m.cmdCursor = 0
+				m.state = stateIdle
+			}
+		}
 	}
 	m.resizeTextarea()
 
@@ -193,15 +379,112 @@ func (m *Model) View() string {
 		status = m.spinner.View() + " thinking..."
 	case stateToolCall:
 		status = m.spinner.View() + " running tool..."
+	case stateModelLoading:
+		status = m.spinner.View() + " loading models..."
+	case stateCommandMenu:
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
+	case stateModelPicker:
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
 	case stateError:
 		status = m.errorStyle.Render("● error: " + m.err.Error())
 	default:
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
 	}
 
-	return m.viewport.View() + "\n" +
-		status + "\n" +
-		m.textarea.View()
+	out := m.viewport.View() + "\n" + status + "\n"
+	if menu := m.renderMenu(); menu != "" {
+		out += menu + "\n"
+	}
+	out += m.textarea.View()
+	return out
+}
+
+// renderMenu returns the popup menu lines for the current state, or
+// an empty string if no menu should be shown.
+func (m *Model) renderMenu() string {
+	switch m.state {
+	case stateCommandMenu:
+		return m.renderCommandMenu()
+	case stateModelPicker:
+		return m.renderModelPicker()
+	}
+	return ""
+}
+
+func (m *Model) renderCommandMenu() string {
+	if len(m.cmdFiltered) == 0 {
+		return m.menuStyle.Render("  (no matching commands)")
+	}
+	var b strings.Builder
+	for i, c := range m.cmdFiltered {
+		line := fmt.Sprintf("  %s  %s", c.Name, c.Description)
+		if i == m.cmdCursor {
+			b.WriteString(m.menuCursorStyle.Render("> " + c.Name + "  " + c.Description))
+		} else {
+			b.WriteString(m.menuStyle.Render(line))
+		}
+		if i < len(m.cmdFiltered)-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func (m *Model) renderModelPicker() string {
+	if len(m.models) == 0 {
+		return m.menuStyle.Render("  (no models)")
+	}
+	// Compute the visible window so the cursor stays in view.
+	start := 0
+	end := len(m.models)
+	if end > maxModelPickerVisible {
+		// Centre cursor when possible.
+		half := maxModelPickerVisible / 2
+		start = m.modelCursor - half
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxModelPickerVisible
+		if end > len(m.models) {
+			end = len(m.models)
+			start = end - maxModelPickerVisible
+		}
+	}
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		// Insert a divider where the recent section ends and the
+		// full catalogue begins, but only when both sides are
+		// visible in the current window — drawing it as the very
+		// first line would just be noise.
+		if m.modelRecentCount > 0 && i == m.modelRecentCount && i > start {
+			b.WriteString(m.menuStyle.Render("  ── all models ──"))
+			b.WriteString("\n")
+		}
+		info := m.models[i]
+		if i == m.modelCursor {
+			b.WriteString(m.menuCursorStyle.Render("> " + info.String()))
+		} else {
+			b.WriteString(m.menuStyle.Render("  " + info.String()))
+		}
+		if i < end-1 {
+			b.WriteString("\n")
+		}
+	}
+	if end-start < len(m.models) {
+		b.WriteString("\n")
+		b.WriteString(m.menuStyle.Render(fmt.Sprintf("  (%d/%d)", m.modelCursor+1, len(m.models))))
+	}
+	return b.String()
+}
+
+// menuHeight returns the number of vertical lines the menu currently
+// consumes, including the trailing newline added by View().
+func (m *Model) menuHeight() int {
+	menu := m.renderMenu()
+	if menu == "" {
+		return 0
+	}
+	return strings.Count(menu, "\n") + 2 // +1 for the line itself, +1 for the trailing newline
 }
 
 // resizeTextarea adjusts the textarea height to fit its content and
@@ -241,7 +524,110 @@ func (m *Model) resizeTextarea() {
 		m.textarea, _ = m.textarea.Update(nil)
 	}
 	if m.height > 0 {
-		m.viewport.Height = m.height - h - chromeHeight
+		m.viewport.Height = m.height - h - chromeHeight - m.menuHeight()
+		if m.viewport.Height < 1 {
+			m.viewport.Height = 1
+		}
+	}
+}
+
+// executeCommand dispatches the user's selection from the command menu.
+// Returns a Cmd if the command needs to fire an async operation.
+func (m *Model) executeCommand(c Command) tea.Cmd {
+	switch c.ID {
+	case CommandModels:
+		if m.modelLister == nil {
+			m.appendOutput(m.errorStyle.Render("Error: model switching is not configured (pass tui.WithModelLister)") + "\n\n")
+			m.state = stateIdle
+			return nil
+		}
+		m.state = stateModelLoading
+		return m.loadModels()
+	case CommandNew:
+		m.executeNewSession()
+		m.state = stateIdle
+		return nil
+	}
+	m.state = stateIdle
+	return nil
+}
+
+// executeNewSession discards the current session and starts fresh.
+func (m *Model) executeNewSession() {
+	m.session = session.New()
+	m.output.Reset()
+	m.refreshViewport()
+	m.appendOutput(m.toolStyle.Render("New session started.") + "\n\n")
+}
+
+// loadModels asynchronously fetches available models from the
+// configured ModelLister and prepends the user's recently used
+// models. Recents that are no longer present in the full list (e.g.
+// the provider was logged out, or the model was filtered out) are
+// dropped silently.
+func (m *Model) loadModels() tea.Cmd {
+	lister := m.modelLister
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		all, err := lister.ListAllModels(ctx)
+		if err != nil {
+			return modelsLoadedMsg{err: err}
+		}
+		// Recents are best-effort: an error fetching them is not
+		// fatal — we still return the full list.
+		recents, _ := lister.RecentModels(ctx)
+
+		present := make(map[string]int, len(all))
+		for i, info := range all {
+			present[info.String()] = i
+		}
+
+		merged := make([]profile.ModelInfo, 0, len(all)+len(recents))
+		seen := make(map[string]bool, len(recents))
+		for _, r := range recents {
+			key := r.String()
+			if seen[key] {
+				continue
+			}
+			idx, ok := present[key]
+			if !ok {
+				continue
+			}
+			// Use the entry from the live list so the Endpoint
+			// reflects current upstream metadata, not what was
+			// frozen in config when the user last picked it.
+			merged = append(merged, all[idx])
+			seen[key] = true
+		}
+		recentCount := len(merged)
+		for _, info := range all {
+			if seen[info.String()] {
+				continue
+			}
+			merged = append(merged, info)
+		}
+
+		return modelsLoadedMsg{models: merged, recentCount: recentCount}
+	}
+}
+
+// switchModel asynchronously builds a provider for the selected model
+// without mutating the agent — the Update loop applies the result so
+// the swap happens on the main goroutine. The selected ModelInfo
+// carries the endpoint metadata populated by ListAllModels, so
+// responses-only Copilot models (e.g. gpt-5.4-mini) are routed to
+// /responses rather than /chat/completions.
+func (m *Model) switchModel(info profile.ModelInfo) tea.Cmd {
+	lister := m.modelLister
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		p, err := lister.LoadProviderForModel(ctx, info)
+		if err != nil {
+			return modelSwitchedMsg{info: info, err: err}
+		}
+		return modelSwitchedMsg{provider: p, info: info}
 	}
 }
 
@@ -271,12 +657,30 @@ func (m *Model) runAgent() tea.Cmd {
 			return agentDoneMsg{}
 		}
 
-		// Read all events and forward them.
-		// We can't easily send multiple msgs from one Cmd, so we process inline.
+		thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Faint(true)
+		currentBlock := conversation.BlockText
+
 		for ev := range events {
 			switch ev.Type {
-			case agent.EventToken:
-				m.appendOutput(ev.Content)
+			case agent.EventBlockStart:
+				currentBlock = ev.BlockType
+				switch ev.BlockType {
+				case conversation.BlockThinking:
+					m.appendOutput(thinkingStyle.Render("\nthinking: "))
+				case conversation.BlockText:
+					// plain text streams inline with no marker.
+				}
+			case agent.EventBlockDelta:
+				switch ev.BlockType {
+				case conversation.BlockText:
+					m.appendOutput(ev.Content)
+				case conversation.BlockThinking:
+					m.appendOutput(thinkingStyle.Render(ev.Content))
+				}
+			case agent.EventBlockEnd:
+				if currentBlock == conversation.BlockThinking {
+					m.appendOutput("\n")
+				}
 			case agent.EventToolCall:
 				m.appendOutput(m.toolStyle.Render("⚡ "+ev.ToolCall.Name) + "\n")
 			case agent.EventToolResult:
@@ -298,9 +702,11 @@ func (m *Model) runAgent() tea.Cmd {
 
 func (m *Model) handleAgentEvent(ev agent.Event) tea.Cmd {
 	switch ev.Type {
-	case agent.EventToken:
+	case agent.EventBlockDelta:
 		m.state = stateRunning
-		m.appendOutput(ev.Content)
+		if ev.BlockType == conversation.BlockText {
+			m.appendOutput(ev.Content)
+		}
 	case agent.EventToolCall:
 		m.state = stateToolCall
 		m.appendOutput(m.toolStyle.Render("⚡ "+ev.ToolCall.Name) + "\n")

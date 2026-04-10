@@ -15,6 +15,13 @@ import (
 	"github.com/stack-bound/stackllm/tools"
 )
 
+func userText(s string) conversation.Message {
+	return conversation.Message{
+		Role:   conversation.RoleUser,
+		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: s}},
+	}
+}
+
 func TestOpenAIProvider_CompleteTextOnly(t *testing.T) {
 	t.Parallel()
 
@@ -29,7 +36,7 @@ data: [DONE]
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("test-key"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) {
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Path != "/v1/chat/completions" {
 				t.Errorf("unexpected path: %s", req.URL.Path)
 			}
@@ -42,19 +49,26 @@ data: [DONE]
 	})
 
 	events, err := p.Complete(context.Background(), Request{
-		Messages: []conversation.Message{{Role: conversation.RoleUser, Content: "Hi"}},
+		Messages: []conversation.Message{userText("Hi")},
 		Stream:   true,
 	})
 	if err != nil {
 		t.Fatalf("Complete error: %v", err)
 	}
 
+	var blocks []conversation.Block
 	var tokens []string
 	var done bool
 	for ev := range events {
 		switch ev.Type {
-		case EventTypeToken:
-			tokens = append(tokens, ev.Content)
+		case EventTypeBlockDelta:
+			if ev.BlockType == conversation.BlockText {
+				tokens = append(tokens, ev.Content)
+			}
+		case EventTypeBlockEnd:
+			if ev.Block != nil {
+				blocks = append(blocks, *ev.Block)
+			}
 		case EventTypeDone:
 			done = true
 		case EventTypeError:
@@ -66,7 +80,10 @@ data: [DONE]
 		t.Error("expected done event")
 	}
 	if got := strings.Join(tokens, ""); got != "Hello world" {
-		t.Errorf("result = %q, want %q", got, "Hello world")
+		t.Errorf("streamed text = %q, want %q", got, "Hello world")
+	}
+	if len(blocks) != 1 || blocks[0].Type != conversation.BlockText || blocks[0].Text != "Hello world" {
+		t.Errorf("closed blocks = %+v", blocks)
 	}
 }
 
@@ -91,7 +108,7 @@ data: [DONE]
 	})
 
 	events, err := p.Complete(context.Background(), Request{
-		Messages: []conversation.Message{{Role: conversation.RoleUser, Content: "read /tmp/test"}},
+		Messages: []conversation.Message{userText("read /tmp/test")},
 		Tools:    []tools.Definition{{Name: "read_file", Description: "read a file"}},
 		Stream:   true,
 	})
@@ -99,9 +116,14 @@ data: [DONE]
 		t.Fatalf("Complete error: %v", err)
 	}
 
+	var blocks []conversation.Block
 	var toolCalls []ToolCall
 	for ev := range events {
 		switch ev.Type {
+		case EventTypeBlockEnd:
+			if ev.Block != nil {
+				blocks = append(blocks, *ev.Block)
+			}
 		case EventTypeToolCall:
 			toolCalls = append(toolCalls, *ev.Call)
 		case EventTypeError:
@@ -109,11 +131,281 @@ data: [DONE]
 		}
 	}
 
-	if len(toolCalls) != 1 {
-		t.Fatalf("got %d tool calls, want 1", len(toolCalls))
+	if len(blocks) != 1 {
+		t.Fatalf("got %d closed blocks, want 1", len(blocks))
 	}
-	if toolCalls[0].Name != "read_file" || toolCalls[0].ID != "call_1" || toolCalls[0].Arguments != `{"path":"/tmp/test"}` {
-		t.Fatalf("tool call = %#v", toolCalls[0])
+	if blocks[0].Type != conversation.BlockToolUse {
+		t.Errorf("block type = %q, want tool_use", blocks[0].Type)
+	}
+	if blocks[0].ToolName != "read_file" || blocks[0].ToolCallID != "call_1" || blocks[0].ToolArgsJSON != `{"path":"/tmp/test"}` {
+		t.Fatalf("tool_use block = %+v", blocks[0])
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("convenience ToolCall events = %d, want 1", len(toolCalls))
+	}
+	if toolCalls[0].Name != "read_file" || toolCalls[0].Arguments != `{"path":"/tmp/test"}` {
+		t.Fatalf("ToolCall event = %+v", toolCalls[0])
+	}
+}
+
+// TestOpenAIProvider_StreamMultipleToolCallsAfterText asserts that
+// chat-completions streams with leading text followed by multiple
+// tool_calls produce a BlockText block first, then BlockToolUse blocks
+// in call-index order. This matches the plan's requirement that
+// BlockToolUse blocks "appear after any preceding text, in call index
+// order".
+func TestOpenAIProvider_StreamMultipleToolCallsAfterText(t *testing.T) {
+	t.Parallel()
+
+	sseData := `data: {"choices":[{"delta":{"content":"let me try both"}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"grep","arguments":"{}"}}]}}]}
+
+data: [DONE]
+
+`
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("k"),
+		Model:       "gpt-4",
+		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
+		MaxRetries:  1,
+	})
+
+	events, err := p.Complete(context.Background(), Request{
+		Messages: []conversation.Message{userText("go")},
+		Tools:    []tools.Definition{{Name: "read"}, {Name: "grep"}},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+
+	var blocks []conversation.Block
+	for ev := range events {
+		if ev.Type == EventTypeBlockEnd && ev.Block != nil {
+			blocks = append(blocks, *ev.Block)
+		}
+	}
+
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %d, want 3 (text + 2 tool_use); got %+v", len(blocks), blocks)
+	}
+	if blocks[0].Type != conversation.BlockText || blocks[0].Text != "let me try both" {
+		t.Errorf("blocks[0] = %+v", blocks[0])
+	}
+	if blocks[1].Type != conversation.BlockToolUse || blocks[1].ToolName != "read" || blocks[1].ToolCallID != "c1" {
+		t.Errorf("blocks[1] = %+v", blocks[1])
+	}
+	if blocks[2].Type != conversation.BlockToolUse || blocks[2].ToolName != "grep" || blocks[2].ToolCallID != "c2" {
+		t.Errorf("blocks[2] = %+v", blocks[2])
+	}
+
+	// Tool_use blocks must carry a non-empty Block.ID too — distinct
+	// from ToolCallID, which is the provider's opaque call_id. The
+	// Block.ID is the stackllm stable identifier used for persistence
+	// and SSE keying.
+	seen := make(map[string]bool, len(blocks))
+	for i, b := range blocks {
+		if b.ID == "" {
+			t.Errorf("blocks[%d].ID is empty; provider must mint IDs at construction", i)
+		}
+		if seen[b.ID] {
+			t.Errorf("blocks[%d].ID = %q collides with an earlier block", i, b.ID)
+		}
+		seen[b.ID] = true
+	}
+}
+
+func TestOpenAIProvider_StreamInterleavedThinkingAndText(t *testing.T) {
+	t.Parallel()
+
+	// Simulates an OpenAI-compatible backend that exposes reasoning
+	// under delta.reasoning_content interleaved with content deltas.
+	// The parser must emit block events that preserve the ordering:
+	//   thinking("plan") → text("answer") → thinking("recheck") → text("done")
+	sseData := `data: {"choices":[{"delta":{"reasoning_content":"plan"}}]}
+
+data: {"choices":[{"delta":{"content":"answer"}}]}
+
+data: {"choices":[{"delta":{"reasoning_content":"recheck"}}]}
+
+data: {"choices":[{"delta":{"content":"done"}}]}
+
+data: [DONE]
+
+`
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("key"),
+		Model:       "gpt-4",
+		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
+		MaxRetries:  1,
+	})
+
+	events, err := p.Complete(context.Background(), Request{
+		Messages: []conversation.Message{userText("hi")},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+
+	var blocks []conversation.Block
+	for ev := range events {
+		if ev.Type == EventTypeBlockEnd && ev.Block != nil {
+			blocks = append(blocks, *ev.Block)
+		}
+	}
+
+	if len(blocks) != 4 {
+		t.Fatalf("got %d blocks, want 4; blocks=%+v", len(blocks), blocks)
+	}
+	wantTypes := []conversation.BlockType{
+		conversation.BlockThinking, conversation.BlockText,
+		conversation.BlockThinking, conversation.BlockText,
+	}
+	wantTexts := []string{"plan", "answer", "recheck", "done"}
+	for i, want := range wantTypes {
+		if blocks[i].Type != want {
+			t.Errorf("blocks[%d].Type = %q, want %q", i, blocks[i].Type, want)
+		}
+		if blocks[i].Text != wantTexts[i] {
+			t.Errorf("blocks[%d].Text = %q, want %q", i, blocks[i].Text, wantTexts[i])
+		}
+	}
+
+	// Every BlockEnd event must carry a non-empty, unique Block.ID —
+	// downstream consumers (web SSE, agent hooks) key on this. The
+	// provider mints IDs at construction time so the hook chain sees
+	// them, not the agent's post-stream EnsureMessageIDs pass.
+	seen := make(map[string]bool, len(blocks))
+	for i, b := range blocks {
+		if b.ID == "" {
+			t.Errorf("blocks[%d].ID is empty; provider must mint IDs at construction", i)
+		}
+		if seen[b.ID] {
+			t.Errorf("blocks[%d].ID = %q collides with an earlier block", i, b.ID)
+		}
+		seen[b.ID] = true
+	}
+}
+
+func TestOpenAIProvider_BuildRequestBody_DropsThinkingAndFlattens(t *testing.T) {
+	t.Parallel()
+
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("k"),
+		Model:       "gpt-4",
+		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil }),
+		MaxRetries:  1,
+	})
+
+	// Assistant with interleaved thinking + text + tool_use. Chat
+	// completions can't carry thinking or interleaving — verify the
+	// flatten behaviour is exactly what the godoc promises.
+	msgs := []conversation.Message{
+		{Role: conversation.RoleUser, Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hi"}}},
+		{
+			Role: conversation.RoleAssistant,
+			Blocks: []conversation.Block{
+				{Type: conversation.BlockThinking, Text: "thinking-a"},
+				{Type: conversation.BlockText, Text: "one"},
+				{Type: conversation.BlockToolUse, ToolCallID: "c1", ToolName: "f", ToolArgsJSON: `{"a":1}`},
+				{Type: conversation.BlockThinking, Text: "thinking-b"},
+				{Type: conversation.BlockText, Text: "two"},
+			},
+		},
+		{
+			Role: conversation.RoleTool,
+			Blocks: []conversation.Block{
+				{Type: conversation.BlockToolResult, ToolCallID: "c1", Text: "result-text"},
+			},
+		},
+	}
+
+	body := p.buildRequestBody(Request{Messages: msgs, Stream: true})
+	wireMsgs := body["messages"].([]map[string]any)
+
+	if len(wireMsgs) != 3 {
+		t.Fatalf("got %d wire messages, want 3", len(wireMsgs))
+	}
+
+	// Assistant: text blocks concatenate; thinking dropped; tool_use hoisted.
+	assistant := wireMsgs[1]
+	if got, want := assistant["content"], "onetwo"; got != want {
+		t.Errorf("assistant.content = %v, want %v", got, want)
+	}
+	tcs, ok := assistant["tool_calls"].([]map[string]any)
+	if !ok || len(tcs) != 1 {
+		t.Fatalf("assistant.tool_calls missing or wrong: %+v", assistant["tool_calls"])
+	}
+	if tcs[0]["id"] != "c1" {
+		t.Errorf("tool_call id = %v", tcs[0]["id"])
+	}
+
+	// Tool message carries tool_call_id from the block, not from the message.
+	tool := wireMsgs[2]
+	if tool["role"] != "tool" {
+		t.Errorf("tool role = %v", tool["role"])
+	}
+	if tool["tool_call_id"] != "c1" {
+		t.Errorf("tool_call_id = %v", tool["tool_call_id"])
+	}
+	if tool["content"] != "result-text" {
+		t.Errorf("tool content = %v", tool["content"])
+	}
+}
+
+func TestOpenAIProvider_BuildRequestBody_MultiPartImage(t *testing.T) {
+	t.Parallel()
+
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("k"),
+		Model:       "gpt-4",
+		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil }),
+		MaxRetries:  1,
+	})
+
+	msgs := []conversation.Message{
+		{
+			Role: conversation.RoleUser,
+			Blocks: []conversation.Block{
+				{Type: conversation.BlockText, Text: "what is this?"},
+				{Type: conversation.BlockImage, MimeType: "image/png", ImageData: []byte{0x89, 0x50}},
+			},
+		},
+	}
+
+	body := p.buildRequestBody(Request{Messages: msgs, Stream: true})
+	wireMsgs := body["messages"].([]map[string]any)
+
+	if len(wireMsgs) != 1 {
+		t.Fatalf("wire messages = %d, want 1", len(wireMsgs))
+	}
+	content, ok := wireMsgs[0]["content"].([]map[string]any)
+	if !ok {
+		t.Fatalf("user content is not multi-part: %T %+v", wireMsgs[0]["content"], wireMsgs[0]["content"])
+	}
+	if len(content) != 2 {
+		t.Fatalf("multi-part length = %d, want 2", len(content))
+	}
+	if content[0]["type"] != "text" || content[0]["text"] != "what is this?" {
+		t.Errorf("part[0] = %+v", content[0])
+	}
+	if content[1]["type"] != "image_url" {
+		t.Errorf("part[1].type = %v", content[1]["type"])
+	}
+	imgURL, _ := content[1]["image_url"].(map[string]any)
+	if imgURL == nil {
+		t.Fatalf("part[1].image_url missing")
+	}
+	if url, _ := imgURL["url"].(string); !strings.HasPrefix(url, "data:image/png;base64,") {
+		t.Errorf("data uri = %q", url)
 	}
 }
 
@@ -137,7 +429,7 @@ func TestOpenAIProvider_RetryOn429(t *testing.T) {
 	})
 
 	events, err := p.Complete(context.Background(), Request{
-		Messages: []conversation.Message{{Role: conversation.RoleUser, Content: "test"}},
+		Messages: []conversation.Message{userText("test")},
 		Stream:   true,
 	})
 	if err != nil {
@@ -146,7 +438,7 @@ func TestOpenAIProvider_RetryOn429(t *testing.T) {
 
 	var gotContent bool
 	for ev := range events {
-		if ev.Type == EventTypeToken && ev.Content == "ok" {
+		if ev.Type == EventTypeBlockEnd && ev.Block != nil && ev.Block.Text == "ok" {
 			gotContent = true
 		}
 		if ev.Type == EventTypeError {
@@ -174,7 +466,7 @@ func TestOpenAIProvider_ErrorResponse(t *testing.T) {
 	})
 
 	events, err := p.Complete(context.Background(), Request{
-		Messages: []conversation.Message{{Role: conversation.RoleUser, Content: "test"}},
+		Messages: []conversation.Message{userText("test")},
 		Stream:   true,
 	})
 	if err != nil {
@@ -299,3 +591,4 @@ func ExampleOpenAIConfig() {
 	fmt.Println(cfg.BaseURL)
 	// Output: https://api.openai.com/v1
 }
+

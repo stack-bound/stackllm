@@ -48,13 +48,18 @@ func KeepLast(msgs []Message, n int) []Message {
 	return out
 }
 
-// defaultTokenEstimate uses a simple chars/4 heuristic.
+// defaultTokenEstimate uses a simple chars/4 heuristic across every
+// block's text-bearing fields. Images and raw artifact bytes are
+// ignored — callers that need to account for image tokens should
+// supply their own count function.
 func defaultTokenEstimate(msgs []Message) int {
 	total := 0
 	for _, m := range msgs {
-		total += len(m.Content) / 4
-		for _, tc := range m.ToolCalls {
-			total += len(tc.Name)/4 + len(tc.Arguments)/4
+		for _, b := range m.Blocks {
+			total += len(b.Text) / 4
+			if b.Type == BlockToolUse {
+				total += len(b.ToolName)/4 + len(b.ToolArgsJSON)/4
+			}
 		}
 	}
 	return total

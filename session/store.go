@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/stack-bound/stackllm/conversation"
 )
 
 // SessionStore persists sessions.
@@ -29,6 +31,9 @@ func NewInMemoryStore() *InMemoryStore {
 func (s *InMemoryStore) Save(_ context.Context, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for i := range sess.Messages {
+		conversation.EnsureMessageIDs(&sess.Messages[i])
+	}
 	s.sessions[sess.ID] = sess
 	return nil
 }

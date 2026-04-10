@@ -2,6 +2,11 @@ package conversation
 
 import "testing"
 
+// mkMsg is a tiny helper that returns a Message with a single BlockText.
+func mkMsg(role Role, text string) Message {
+	return Message{Role: role, Blocks: []Block{{Type: BlockText, Text: text}}}
+}
+
 func TestKeepLast(t *testing.T) {
 	t.Parallel()
 
@@ -22,8 +27,8 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "only system messages",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys1"},
-				{Role: RoleSystem, Content: "sys2"},
+				mkMsg(RoleSystem, "sys1"),
+				mkMsg(RoleSystem, "sys2"),
 			},
 			n:        1,
 			wantLen:  2,
@@ -32,9 +37,9 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "already under limit",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},
-				{Role: RoleUser, Content: "hello"},
-				{Role: RoleAssistant, Content: "hi"},
+				mkMsg(RoleSystem, "sys"),
+				mkMsg(RoleUser, "hello"),
+				mkMsg(RoleAssistant, "hi"),
 			},
 			n:        5,
 			wantLen:  3,
@@ -43,11 +48,11 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "trim to last 1",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},
-				{Role: RoleUser, Content: "first"},
-				{Role: RoleAssistant, Content: "response1"},
-				{Role: RoleUser, Content: "second"},
-				{Role: RoleAssistant, Content: "response2"},
+				mkMsg(RoleSystem, "sys"),
+				mkMsg(RoleUser, "first"),
+				mkMsg(RoleAssistant, "response1"),
+				mkMsg(RoleUser, "second"),
+				mkMsg(RoleAssistant, "response2"),
 			},
 			n:        1,
 			wantLen:  2, // system + last 1 non-system
@@ -56,11 +61,11 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "trim to last 2",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},
-				{Role: RoleUser, Content: "first"},
-				{Role: RoleAssistant, Content: "response1"},
-				{Role: RoleUser, Content: "second"},
-				{Role: RoleAssistant, Content: "response2"},
+				mkMsg(RoleSystem, "sys"),
+				mkMsg(RoleUser, "first"),
+				mkMsg(RoleAssistant, "response1"),
+				mkMsg(RoleUser, "second"),
+				mkMsg(RoleAssistant, "response2"),
 			},
 			n:        2,
 			wantLen:  3, // system + last 2 non-system
@@ -69,8 +74,8 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "n=0 keeps only system",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},
-				{Role: RoleUser, Content: "hello"},
+				mkMsg(RoleSystem, "sys"),
+				mkMsg(RoleUser, "hello"),
 			},
 			n:        0,
 			wantLen:  1,
@@ -79,11 +84,11 @@ func TestKeepLast(t *testing.T) {
 		{
 			name: "system messages interspersed",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys1"},
-				{Role: RoleUser, Content: "a"},
-				{Role: RoleSystem, Content: "sys2"},
-				{Role: RoleUser, Content: "b"},
-				{Role: RoleAssistant, Content: "c"},
+				mkMsg(RoleSystem, "sys1"),
+				mkMsg(RoleUser, "a"),
+				mkMsg(RoleSystem, "sys2"),
+				mkMsg(RoleUser, "b"),
+				mkMsg(RoleAssistant, "c"),
 			},
 			n:        1,
 			wantLen:  3, // sys1 + sys2 + last non-system
@@ -98,7 +103,7 @@ func TestKeepLast(t *testing.T) {
 			if len(got) != tt.wantLen {
 				t.Errorf("KeepLast() len = %d, want %d (%s)", len(got), tt.wantLen, tt.wantDesc)
 				for i, m := range got {
-					t.Logf("  [%d] %s: %s", i, m.Role, m.Content)
+					t.Logf("  [%d] %s: %s", i, m.Role, m.TextContent())
 				}
 			}
 		})
@@ -109,23 +114,23 @@ func TestKeepLast_PreservesContent(t *testing.T) {
 	t.Parallel()
 
 	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
-		{Role: RoleUser, Content: "first"},
-		{Role: RoleAssistant, Content: "response1"},
-		{Role: RoleUser, Content: "second"},
-		{Role: RoleAssistant, Content: "response2"},
+		mkMsg(RoleSystem, "sys"),
+		mkMsg(RoleUser, "first"),
+		mkMsg(RoleAssistant, "response1"),
+		mkMsg(RoleUser, "second"),
+		mkMsg(RoleAssistant, "response2"),
 	}
 
 	got := KeepLast(msgs, 2)
 
-	if got[0].Content != "sys" {
-		t.Errorf("got[0].Content = %q, want %q", got[0].Content, "sys")
+	if got[0].TextContent() != "sys" {
+		t.Errorf("got[0] text = %q, want %q", got[0].TextContent(), "sys")
 	}
-	if got[1].Content != "second" {
-		t.Errorf("got[1].Content = %q, want %q", got[1].Content, "second")
+	if got[1].TextContent() != "second" {
+		t.Errorf("got[1] text = %q, want %q", got[1].TextContent(), "second")
 	}
-	if got[2].Content != "response2" {
-		t.Errorf("got[2].Content = %q, want %q", got[2].Content, "response2")
+	if got[2].TextContent() != "response2" {
+		t.Errorf("got[2] text = %q, want %q", got[2].TextContent(), "response2")
 	}
 }
 
@@ -133,9 +138,9 @@ func TestKeepLast_DoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
 	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
-		{Role: RoleUser, Content: "a"},
-		{Role: RoleUser, Content: "b"},
+		mkMsg(RoleSystem, "sys"),
+		mkMsg(RoleUser, "a"),
+		mkMsg(RoleUser, "b"),
 	}
 	original := make([]Message, len(msgs))
 	copy(original, msgs)
@@ -143,7 +148,7 @@ func TestKeepLast_DoesNotMutateInput(t *testing.T) {
 	_ = KeepLast(msgs, 1)
 
 	for i := range msgs {
-		if msgs[i].Content != original[i].Content {
+		if msgs[i].TextContent() != original[i].TextContent() {
 			t.Errorf("input msgs[%d] was mutated", i)
 		}
 	}
@@ -152,11 +157,14 @@ func TestKeepLast_DoesNotMutateInput(t *testing.T) {
 func TestTokenBudget(t *testing.T) {
 	t.Parallel()
 
-	// Simple counter: each message costs len(Content).
+	// Simple counter: each message costs the total chars across all its
+	// text-bearing blocks.
 	charCount := func(msgs []Message) int {
 		total := 0
 		for _, m := range msgs {
-			total += len(m.Content)
+			for _, b := range m.Blocks {
+				total += len(b.Text)
+			}
 		}
 		return total
 	}
@@ -176,8 +184,8 @@ func TestTokenBudget(t *testing.T) {
 		{
 			name: "already under budget",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},
-				{Role: RoleUser, Content: "hi"},
+				mkMsg(RoleSystem, "sys"),
+				mkMsg(RoleUser, "hi"),
 			},
 			maxTokens: 100,
 			wantLen:   2,
@@ -185,10 +193,10 @@ func TestTokenBudget(t *testing.T) {
 		{
 			name: "drops oldest non-system first",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "sys"},       // 3 chars
-				{Role: RoleUser, Content: "aaaaaaaaaa"},  // 10 chars
-				{Role: RoleAssistant, Content: "bbbbb"},  // 5 chars
-				{Role: RoleUser, Content: "cc"},          // 2 chars
+				mkMsg(RoleSystem, "sys"),           // 3 chars
+				mkMsg(RoleUser, "aaaaaaaaaa"),      // 10 chars
+				mkMsg(RoleAssistant, "bbbbb"),      // 5 chars
+				mkMsg(RoleUser, "cc"),              // 2 chars
 			},
 			maxTokens: 11, // need to drop "aaaaaaaaaa" (total would be 3+5+2=10)
 			wantLen:   3,
@@ -196,9 +204,9 @@ func TestTokenBudget(t *testing.T) {
 		{
 			name: "only system messages remain",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "s"},
-				{Role: RoleUser, Content: "xxxxxxxxxx"},
-				{Role: RoleUser, Content: "yyyyyyyyyy"},
+				mkMsg(RoleSystem, "s"),
+				mkMsg(RoleUser, "xxxxxxxxxx"),
+				mkMsg(RoleUser, "yyyyyyyyyy"),
 			},
 			maxTokens: 1,
 			wantLen:   1,
@@ -206,7 +214,7 @@ func TestTokenBudget(t *testing.T) {
 		{
 			name: "system messages never dropped",
 			msgs: []Message{
-				{Role: RoleSystem, Content: "a very long system message that exceeds budget"},
+				mkMsg(RoleSystem, "a very long system message that exceeds budget"),
 			},
 			maxTokens: 5,
 			wantLen:   1,
@@ -220,7 +228,7 @@ func TestTokenBudget(t *testing.T) {
 			if len(got) != tt.wantLen {
 				t.Errorf("TokenBudget() len = %d, want %d", len(got), tt.wantLen)
 				for i, m := range got {
-					t.Logf("  [%d] %s: %q", i, m.Role, m.Content)
+					t.Logf("  [%d] %s: %q", i, m.Role, m.TextContent())
 				}
 			}
 		})
@@ -232,8 +240,8 @@ func TestTokenBudget_NilCount(t *testing.T) {
 
 	// With nil count, uses default chars/4 heuristic.
 	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
-		{Role: RoleUser, Content: "hello world this is a test message"},
+		mkMsg(RoleSystem, "sys"),
+		mkMsg(RoleUser, "hello world this is a test message"),
 	}
 
 	// Should not panic with nil count function.
@@ -247,9 +255,9 @@ func TestTokenBudget_DoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
 	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
-		{Role: RoleUser, Content: "aaaaaaaaaa"},
-		{Role: RoleUser, Content: "bb"},
+		mkMsg(RoleSystem, "sys"),
+		mkMsg(RoleUser, "aaaaaaaaaa"),
+		mkMsg(RoleUser, "bb"),
 	}
 	original := make([]Message, len(msgs))
 	copy(original, msgs)
@@ -257,7 +265,9 @@ func TestTokenBudget_DoesNotMutateInput(t *testing.T) {
 	charCount := func(msgs []Message) int {
 		total := 0
 		for _, m := range msgs {
-			total += len(m.Content)
+			for _, b := range m.Blocks {
+				total += len(b.Text)
+			}
 		}
 		return total
 	}
@@ -265,7 +275,7 @@ func TestTokenBudget_DoesNotMutateInput(t *testing.T) {
 	_ = TokenBudget(msgs, 5, charCount)
 
 	for i := range msgs {
-		if msgs[i].Content != original[i].Content {
+		if msgs[i].TextContent() != original[i].TextContent() {
 			t.Errorf("input msgs[%d] was mutated", i)
 		}
 	}

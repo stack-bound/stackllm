@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,11 @@ type Config struct {
 	HTTPClient   *http.Client      // override for testing
 	MaxRetries   int               // default 3; retries on 429 and 5xx
 	BaseBackoff  time.Duration     // base for exponential backoff; default 1s
+
+	// Endpoint selects the API path: "" (default) → /chat/completions,
+	// EndpointResponses ("/responses") → OpenAI Responses API. Used for
+	// Copilot models that are not accessible via /chat/completions.
+	Endpoint string
 }
 
 // OpenAIConfig returns config for the OpenAI API.
@@ -112,8 +118,22 @@ func New(cfg Config) *OpenAIProvider {
 	return &OpenAIProvider{cfg: cfg}
 }
 
-// Complete makes a streaming chat completion request and returns a channel of events.
+// Complete makes a streaming completion request and returns a channel of events.
+//
+// The request path is selected by p.cfg.Endpoint:
+//   - ""                  → /chat/completions (default)
+//   - EndpointResponses   → /responses (used for Copilot responses-only models)
 func (p *OpenAIProvider) Complete(ctx context.Context, req Request) (<-chan Event, error) {
+	switch p.cfg.Endpoint {
+	case EndpointResponses:
+		return p.completeResponses(ctx, req)
+	default:
+		return p.completeChat(ctx, req)
+	}
+}
+
+// completeChat dispatches the request to the legacy /chat/completions endpoint.
+func (p *OpenAIProvider) completeChat(ctx context.Context, req Request) (<-chan Event, error) {
 	body := p.buildRequestBody(req)
 
 	jsonBody, err := json.Marshal(body)
@@ -130,14 +150,20 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req Request) (<-chan Even
 
 	go func() {
 		defer close(events)
-		p.doWithRetry(ctx, url, jsonBody, events)
+		p.doStreamingPOST(ctx, url, jsonBody, events, p.readChatSSE)
 	}()
 
 	return events, nil
 }
 
-// Models returns available model names.
-func (p *OpenAIProvider) Models(ctx context.Context) ([]string, error) {
+// Models returns model metadata from the provider's /models endpoint.
+//
+// The returned ModelMeta entries include any per-model SupportedEndpoints
+// and capabilities.type fields when the upstream API exposes them
+// (currently only Copilot). For OpenAI/Gemini/Ollama those fields are
+// nil/empty and callers should treat the model as compatible with the
+// provider's default endpoint.
+func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 	url := p.cfg.BaseURL + "/models"
 	if p.cfg.APIVersion != "" {
 		url += "?api-version=" + p.cfg.APIVersion
@@ -162,46 +188,54 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]string, error) {
 
 	var result struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                 string   `json:"id"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
+			ModelPickerEnabled *bool    `json:"model_picker_enabled"`
+			Capabilities       struct {
+				Type string `json:"type"`
+			} `json:"capabilities"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("provider: models decode: %w", err)
 	}
 
-	models := make([]string, len(result.Data))
+	models := make([]ModelMeta, len(result.Data))
 	for i, m := range result.Data {
-		models[i] = m.ID
+		models[i] = ModelMeta{
+			ID:                 m.ID,
+			SupportedEndpoints: m.SupportedEndpoints,
+			Type:               m.Capabilities.Type,
+			ModelPickerEnabled: m.ModelPickerEnabled,
+		}
 	}
 	return models, nil
 }
 
+// buildRequestBody flattens the block-shaped Messages into the legacy
+// OpenAI chat completions wire format.
+//
+// Chat completions cannot represent interleaved thinking/text/tool_use
+// in a single assistant turn. This method is intentionally lossy:
+//
+//   - BlockThinking blocks are dropped on serialization. The /responses
+//     API preserves reasoning; the legacy chat API has no field for it.
+//   - A single assistant message containing multiple text and tool_use
+//     blocks is collapsed to one chat message: text blocks concatenate
+//     into "content", and tool_use blocks are hoisted into tool_calls.
+//   - A tool-role message that carries multiple tool_result blocks
+//     emits one chat "tool" message per block (chat completions
+//     requires a 1:1 mapping of tool_call_id to tool message).
+//   - User messages with image blocks emit OpenAI's multi-part content
+//     array (text parts + image_url parts with data URIs for inline
+//     bytes).
+//
+// Callers that need faithful replay of interleaved output should use
+// the Responses API endpoint (Endpoint=EndpointResponses) instead.
 func (p *OpenAIProvider) buildRequestBody(req Request) map[string]any {
-	// Convert messages to OpenAI format.
-	msgs := make([]map[string]any, len(req.Messages))
-	for i, m := range req.Messages {
-		msg := map[string]any{
-			"role":    string(m.Role),
-			"content": m.Content,
-		}
-		if m.ToolCallID != "" {
-			msg["tool_call_id"] = m.ToolCallID
-		}
-		if len(m.ToolCalls) > 0 {
-			tcs := make([]map[string]any, len(m.ToolCalls))
-			for j, tc := range m.ToolCalls {
-				tcs[j] = map[string]any{
-					"id":   tc.ID,
-					"type": "function",
-					"function": map[string]any{
-						"name":      tc.Name,
-						"arguments": tc.Arguments,
-					},
-				}
-			}
-			msg["tool_calls"] = tcs
-		}
-		msgs[i] = msg
+	msgs := make([]map[string]any, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		msgs = append(msgs, messageToChatCompletions(m)...)
 	}
 
 	body := map[string]any{
@@ -240,6 +274,125 @@ func (p *OpenAIProvider) buildRequestBody(req Request) map[string]any {
 	return body
 }
 
+// messageToChatCompletions converts one block-shaped Message into one
+// or more chat-completions message dicts. Most messages yield a single
+// dict; a tool-role message with N tool_result blocks yields N dicts
+// (one per block) because the chat completions API requires a 1:1
+// mapping between tool_call_id and tool message.
+func messageToChatCompletions(m conversation.Message) []map[string]any {
+	switch m.Role {
+	case conversation.RoleTool:
+		results := m.ToolResults()
+		if len(results) == 0 {
+			// Fallback: a tool-role message without explicit
+			// tool_result blocks still needs to travel as a tool
+			// message so the assistant doesn't see a broken turn.
+			return []map[string]any{{
+				"role":    "tool",
+				"content": m.TextContent(),
+			}}
+		}
+		out := make([]map[string]any, 0, len(results))
+		for _, r := range results {
+			out = append(out, map[string]any{
+				"role":         "tool",
+				"tool_call_id": r.ToolCallID,
+				"content":      r.Text,
+			})
+		}
+		return out
+
+	case conversation.RoleUser:
+		content := userContentForChat(m)
+		return []map[string]any{{
+			"role":    "user",
+			"content": content,
+		}}
+
+	case conversation.RoleSystem:
+		return []map[string]any{{
+			"role":    "system",
+			"content": m.TextContent(),
+		}}
+
+	case conversation.RoleAssistant:
+		msg := map[string]any{
+			"role":    "assistant",
+			"content": m.TextContent(),
+		}
+		var toolCalls []map[string]any
+		for _, b := range m.Blocks {
+			if b.Type != conversation.BlockToolUse {
+				continue
+			}
+			args := b.ToolArgsJSON
+			if args == "" {
+				args = "{}"
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   b.ToolCallID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      b.ToolName,
+					"arguments": args,
+				},
+			})
+		}
+		if len(toolCalls) > 0 {
+			msg["tool_calls"] = toolCalls
+		}
+		return []map[string]any{msg}
+	}
+
+	return []map[string]any{{
+		"role":    string(m.Role),
+		"content": m.TextContent(),
+	}}
+}
+
+// userContentForChat returns either a plain string (when the user
+// message is pure text) or OpenAI's multi-part content array (when the
+// message carries image blocks).
+func userContentForChat(m conversation.Message) any {
+	hasImage := false
+	for _, b := range m.Blocks {
+		if b.Type == conversation.BlockImage {
+			hasImage = true
+			break
+		}
+	}
+	if !hasImage {
+		return m.TextContent()
+	}
+
+	parts := make([]map[string]any, 0, len(m.Blocks))
+	for _, b := range m.Blocks {
+		switch b.Type {
+		case conversation.BlockText:
+			parts = append(parts, map[string]any{
+				"type": "text",
+				"text": b.Text,
+			})
+		case conversation.BlockImage:
+			url := b.ImageURL
+			if url == "" && len(b.ImageData) > 0 {
+				mime := b.MimeType
+				if mime == "" {
+					mime = "image/png"
+				}
+				url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b.ImageData)
+			}
+			parts = append(parts, map[string]any{
+				"type": "image_url",
+				"image_url": map[string]any{
+					"url": url,
+				},
+			})
+		}
+	}
+	return parts
+}
+
 func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -248,7 +401,13 @@ func (p *OpenAIProvider) setHeaders(req *http.Request) {
 	}
 }
 
-func (p *OpenAIProvider) doWithRetry(ctx context.Context, url string, body []byte, events chan<- Event) {
+// sseReader reads a streaming response body and emits provider events.
+type sseReader func(io.Reader, chan<- Event)
+
+// doStreamingPOST POSTs body to url, retries on 429/5xx, and on success
+// hands the response body to reader for SSE parsing. Errors are emitted
+// to events as Event{Type: EventTypeError}.
+func (p *OpenAIProvider) doStreamingPOST(ctx context.Context, url string, body []byte, events chan<- Event, reader sseReader) {
 	var lastErr error
 	for attempt := 0; attempt < p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -287,7 +446,7 @@ func (p *OpenAIProvider) doWithRetry(ctx context.Context, url string, body []byt
 			return
 		}
 
-		p.readSSE(resp.Body, events)
+		reader(resp.Body, events)
 		resp.Body.Close()
 		return
 	}
@@ -299,13 +458,77 @@ type toolCallAcc struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+	started   bool // whether a BlockStart was already emitted
 }
 
-func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
+// chatBlockKind tracks which kind of text-bearing block is currently
+// open in the chat-completions stream so that we can emit a clean
+// BlockEnd / BlockStart pair when the model switches between
+// reasoning_content and content deltas.
+type chatBlockKind int
+
+const (
+	chatBlockNone chatBlockKind = iota
+	chatBlockText
+	chatBlockThinking
+)
+
+// readChatSSE parses the chat completions SSE stream and emits ordered
+// block events. Reasoning deltas (delta.reasoning_content, exposed by
+// several OpenAI-compatible backends) are mapped to BlockThinking
+// blocks; normal content deltas become BlockText. Tool call argument
+// deltas are streamed as BlockDelta events on the corresponding
+// BlockToolUse block.
+//
+// On [DONE] any still-open text / thinking block is closed, all
+// accumulated tool_use blocks are finalised in index order, and a
+// single EventTypeDone is emitted.
+func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(body)
+	// Single delta payloads can exceed 64 KiB for multi-part or image
+	// responses; give the scanner headroom.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	toolCalls := make(map[int]*toolCallAcc)
-	var maxIndex int = -1
+	var toolOrder []int
+
+	currentKind := chatBlockNone
+	var currentText strings.Builder
+
+	closeCurrent := func() {
+		if currentKind == chatBlockNone {
+			return
+		}
+		var blk conversation.Block
+		switch currentKind {
+		case chatBlockText:
+			blk = conversation.Block{ID: conversation.NewID(), Type: conversation.BlockText, Text: currentText.String()}
+		case chatBlockThinking:
+			blk = conversation.Block{ID: conversation.NewID(), Type: conversation.BlockThinking, Text: currentText.String()}
+		}
+		events <- Event{Type: EventTypeBlockEnd, BlockType: blk.Type, Block: &blk}
+		currentKind = chatBlockNone
+		currentText.Reset()
+	}
+
+	switchTo := func(kind chatBlockKind) conversation.BlockType {
+		if currentKind != kind {
+			closeCurrent()
+			currentKind = kind
+			var bt conversation.BlockType
+			if kind == chatBlockText {
+				bt = conversation.BlockText
+			} else {
+				bt = conversation.BlockThinking
+			}
+			events <- Event{Type: EventTypeBlockStart, BlockType: bt}
+			return bt
+		}
+		if kind == chatBlockText {
+			return conversation.BlockText
+		}
+		return conversation.BlockThinking
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -316,18 +539,32 @@ func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
 		data := strings.TrimPrefix(line, "data: ")
 
 		if data == "[DONE]" {
-			// Emit accumulated tool calls in index order.
-			for i := 0; i <= maxIndex; i++ {
-				tc, ok := toolCalls[i]
-				if !ok {
-					continue
+			closeCurrent()
+
+			// Emit accumulated tool calls in index order. If we
+			// never saw a BlockStart for a given tool call (arguments
+			// arrived in a single chunk on finish), synthesise one
+			// here so the event sequence remains well-formed.
+			for _, i := range toolOrder {
+				tc := toolCalls[i]
+				if !tc.started {
+					events <- Event{Type: EventTypeBlockStart, BlockType: conversation.BlockToolUse}
 				}
+				args := tc.Arguments.String()
+				blk := conversation.Block{
+					ID:           conversation.NewID(),
+					Type:         conversation.BlockToolUse,
+					ToolCallID:   tc.ID,
+					ToolName:     tc.Name,
+					ToolArgsJSON: args,
+				}
+				events <- Event{Type: EventTypeBlockEnd, BlockType: conversation.BlockToolUse, Block: &blk}
 				events <- Event{
 					Type: EventTypeToolCall,
 					Call: &conversation.ToolCall{
 						ID:        tc.ID,
 						Name:      tc.Name,
-						Arguments: tc.Arguments.String(),
+						Arguments: args,
 					},
 				}
 			}
@@ -338,8 +575,10 @@ func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
@@ -362,8 +601,22 @@ func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
 
 		delta := chunk.Choices[0].Delta
 
+		// Some backends expose reasoning under different field names.
+		reasoning := delta.ReasoningContent
+		if reasoning == "" {
+			reasoning = delta.Reasoning
+		}
+
+		if reasoning != "" {
+			bt := switchTo(chatBlockThinking)
+			currentText.WriteString(reasoning)
+			events <- Event{Type: EventTypeBlockDelta, BlockType: bt, Content: reasoning}
+		}
+
 		if delta.Content != "" {
-			events <- Event{Type: EventTypeToken, Content: delta.Content}
+			bt := switchTo(chatBlockText)
+			currentText.WriteString(delta.Content)
+			events <- Event{Type: EventTypeBlockDelta, BlockType: bt, Content: delta.Content}
 		}
 
 		for _, tc := range delta.ToolCalls {
@@ -371,9 +624,12 @@ func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
 			if !ok {
 				acc = &toolCallAcc{}
 				toolCalls[tc.Index] = acc
-				if tc.Index > maxIndex {
-					maxIndex = tc.Index
-				}
+				toolOrder = append(toolOrder, tc.Index)
+				// A new tool_use block has opened. Close any still-open
+				// text/thinking block first so ordering is preserved.
+				closeCurrent()
+				events <- Event{Type: EventTypeBlockStart, BlockType: conversation.BlockToolUse}
+				acc.started = true
 			}
 			if tc.ID != "" {
 				acc.ID = tc.ID
@@ -383,7 +639,13 @@ func (p *OpenAIProvider) readSSE(body io.Reader, events chan<- Event) {
 			}
 			if tc.Function.Arguments != "" {
 				acc.Arguments.WriteString(tc.Function.Arguments)
+				events <- Event{
+					Type:      EventTypeBlockDelta,
+					BlockType: conversation.BlockToolUse,
+					Content:   tc.Function.Arguments,
+				}
 			}
 		}
 	}
+	closeCurrent()
 }

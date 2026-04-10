@@ -6,7 +6,10 @@ import "github.com/stack-bound/stackllm/conversation"
 type EventType int
 
 const (
-	EventToken      EventType = iota // streaming text delta
+	EventBlockStart EventType = iota // a new block opened in the provider stream
+	EventBlockDelta                  // streaming delta for the currently open block
+	EventBlockEnd                    // the currently open block closed
+	EventToken                       // convenience alias: BlockDelta filtered to BlockText
 	EventToolCall                    // tool call dispatched
 	EventToolResult                  // tool call completed
 	EventStepDone                    // single step completed
@@ -15,12 +18,26 @@ const (
 )
 
 // Event is emitted by the agent loop during Run.
+//
+// Field population by Type:
+//
+//	EventBlockStart: BlockType
+//	EventBlockDelta: BlockType, Content
+//	EventBlockEnd:   BlockType, Block
+//	EventToken:      Content (convenience for BlockText deltas)
+//	EventToolCall:   ToolCall
+//	EventToolResult: ToolCall, ToolResult
+//	EventStepDone:   Step
+//	EventComplete:   Messages
+//	EventError:      Err, Messages
 type Event struct {
 	Type       EventType
-	Content    string             // set for EventToken
+	BlockType  conversation.BlockType
+	Block      *conversation.Block
+	Content    string                 // set for EventToken and EventBlockDelta
 	ToolCall   *conversation.ToolCall // set for EventToolCall
-	ToolResult string             // set for EventToolResult
-	Err        error              // set for EventError
-	Step       int                // current step number
-	Messages   []conversation.Message // set for EventComplete
+	ToolResult string                 // set for EventToolResult
+	Err        error                  // set for EventError
+	Step       int                    // current step number
+	Messages   []conversation.Message // set for EventComplete and EventError
 }
