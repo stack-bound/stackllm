@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract changelog section
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          if [ ! -f CHANGELOG.md ]; then
+            echo "CHANGELOG.md not found at repo root" >&2
+            exit 1
+          fi
+
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found && /^# Notes/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if ! grep -q '[^[:space:]]' release_notes.md; then
+            echo "No CHANGELOG.md section found for version ${VERSION}" >&2
+            echo "Expected a heading like: ## [${VERSION}] - YYYY-MM-DD" >&2
+            exit 1
+          fi
+
+          echo "----- release notes for ${TAG} -----"
+          cat release_notes.md
+          echo "------------------------------------"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          case "${GITHUB_REF_NAME}" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file release_notes.md \
+            ${PRERELEASE_FLAG}
