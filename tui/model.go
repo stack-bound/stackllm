@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/cellbuf"
 
 	"github.com/stack-bound/stackllm/agent"
 	"github.com/stack-bound/stackllm/conversation"
@@ -54,12 +55,23 @@ type Model struct {
 	errorStyle     lipgloss.Style
 }
 
+const (
+	// chromeHeight is the number of rows used by the status line and newlines
+	// between the viewport, status, and textarea in View().
+	chromeHeight = 2
+
+	// maxInputHeight is the maximum number of rows the textarea can grow to.
+	maxInputHeight = 8
+)
+
 // New creates a new TUI Model.
 func New(a *agent.Agent, store session.SessionStore) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message..."
+	ta.Prompt = ""
 	ta.Focus()
-	ta.SetHeight(3)
+	ta.SetHeight(1)
+	ta.MaxHeight = maxInputHeight
 	ta.ShowLineNumbers = false
 
 	vp := viewport.New(80, 20)
@@ -91,6 +103,7 @@ func (m *Model) Init() tea.Cmd {
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	var skipTextarea bool
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -100,7 +113,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 			}
 			return m, tea.Quit
+		case tea.KeyCtrlJ: // Shift+Enter sends \n (linefeed) in many terminals
+			m.textarea.InsertString("\n")
+			skipTextarea = true
 		case tea.KeyEnter:
+			if msg.Alt {
+				break // pass Alt+Enter to textarea for newline insertion
+			}
+			skipTextarea = true // consume plain Enter, don't let textarea add a newline
 			if m.state == stateRunning {
 				break
 			}
@@ -122,8 +142,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 6
 		m.textarea.SetWidth(msg.Width)
+		// Pad the placeholder with Braille Pattern Blank (U+2800) so the
+		// CursorLine highlight fills the full width. The textarea's
+		// placeholder renderer uses strings.TrimSpace which strips normal
+		// spaces, but U+2800 is not a Unicode space so it survives.
+		base := "Type a message..."
+		if w := m.textarea.Width(); w > len(base) {
+			m.textarea.Placeholder = base + strings.Repeat("\u2800", w-len(base))
+		}
+		m.resizeTextarea()
+		m.refreshViewport()
 
 	case spinner.TickMsg:
 		if m.state == stateRunning || m.state == stateToolCall {
@@ -137,15 +166,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		m.state = stateIdle
-		m.appendOutput("\n")
+		m.appendOutput("\n\n")
 		if m.store != nil {
 			m.store.Save(context.Background(), m.session)
 		}
 	}
 
 	var cmd tea.Cmd
-	m.textarea, cmd = m.textarea.Update(msg)
-	cmds = append(cmds, cmd)
+	if !skipTextarea {
+		m.textarea, cmd = m.textarea.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+	m.resizeTextarea()
 
 	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
@@ -172,10 +204,59 @@ func (m *Model) View() string {
 		m.textarea.View()
 }
 
+// resizeTextarea adjusts the textarea height to fit its content and
+// recalculates the viewport height to fill the remaining space.
+func (m *Model) resizeTextarea() {
+	w := m.textarea.Width()
+	if w <= 0 {
+		return
+	}
+
+	val := m.textarea.Value()
+	visual := 0
+	for _, line := range strings.Split(val, "\n") {
+		if len(line) == 0 {
+			visual++
+		} else {
+			visual += strings.Count(cellbuf.Wrap(line, w, ""), "\n") + 1
+		}
+	}
+
+	h := visual
+	if h < 1 {
+		h = 1
+	}
+	if h > maxInputHeight {
+		h = maxInputHeight
+	}
+
+	prev := m.textarea.Height()
+	m.textarea.SetHeight(h)
+	if h != prev {
+		// The textarea's Update ran repositionView with the old height,
+		// leaving a stale viewport scroll offset. Reset by re-setting the
+		// value (which calls viewport.GotoTop internally), then trigger
+		// repositionView via a no-op Update with the new height.
+		m.textarea.SetValue(m.textarea.Value())
+		m.textarea, _ = m.textarea.Update(nil)
+	}
+	if m.height > 0 {
+		m.viewport.Height = m.height - h - chromeHeight
+	}
+}
+
 func (m *Model) appendOutput(s string) {
 	m.output.WriteString(s)
-	m.viewport.SetContent(m.output.String())
+	m.refreshViewport()
 	m.viewport.GotoBottom()
+}
+
+func (m *Model) refreshViewport() {
+	content := m.output.String()
+	if m.width > 0 {
+		content = cellbuf.Wrap(content, m.width, "")
+	}
+	m.viewport.SetContent(content)
 }
 
 func (m *Model) runAgent() tea.Cmd {
