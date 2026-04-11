@@ -48,8 +48,15 @@ func main() {
 		agent.WithMaxSteps(10),
 	)
 
-	// TUI.
-	store := session.NewInMemoryStore()
+	// TUI. Use a persistent SQLite-backed store so session history
+	// survives across runs and /sessions, /fork, /export all work.
+	store, err := session.OpenSQLiteStore(session.SQLiteConfig{AppName: "stackllm-tui-example"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening session store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
 	m := tui.New(a, store, tui.WithModelLister(mgr))
 
 	prog := tea.NewProgram(m, tea.WithAltScreen())

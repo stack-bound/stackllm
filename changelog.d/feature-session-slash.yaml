@@ -1,0 +1,22 @@
+deployment:
+  - ""
+added:
+  - "TUI `/help` command listing all available slash commands with descriptions"
+  - "TUI `/sessions` command to browse, switch, and delete persisted sessions from a keyboard-driven picker"
+  - "TUI `/rename` command with a centered modal for renaming the current session"
+  - "TUI `/fork` command with a message picker for branching the current session at any point in its history"
+  - "TUI `/delete` command to remove the current session and start fresh"
+  - "TUI `/export` command for saving the current session to a JSONL file"
+  - "Session indicator in the TUI status bar showing the current session name and message count"
+changed:
+  - "TUI example now uses the SQLite-backed session store so sessions persist across runs"
+deprecated:
+  - ""
+removed:
+  - ""
+fixed:
+  - ""
+security:
+  - ""
+yanked:
+  - ""
