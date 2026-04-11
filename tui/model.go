@@ -646,43 +646,28 @@ func (m *Model) View() string {
 		return m.renderConfirmModal()
 	}
 
-	var right string
+	var status string
 	switch m.state {
 	case stateRunning:
-		right = m.spinner.View() + " thinking..."
+		status = m.spinner.View() + " thinking..."
 	case stateToolCall:
-		right = m.spinner.View() + " running tool..."
+		status = m.spinner.View() + " running tool..."
 	case stateModelLoading:
-		right = m.spinner.View() + " loading models..."
+		status = m.spinner.View() + " loading models..."
 	case stateSessionLoading:
-		right = m.spinner.View() + " loading sessions..."
+		status = m.spinner.View() + " loading sessions..."
 	case stateCommandMenu:
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
 	case stateModelPicker:
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
 	case stateSessionPicker:
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a session")
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a session")
 	case stateForkPicker:
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select fork point")
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select fork point")
 	case stateError:
-		right = m.errorStyle.Render("● error: " + m.err.Error())
+		status = m.errorStyle.Render("● error: " + m.err.Error())
 	default:
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
-	}
-
-	left := m.menuStyle.Render(m.renderSessionStatus())
-
-	var status string
-	if m.width > 0 {
-		rightW := lipgloss.Width(right)
-		leftW := lipgloss.Width(left)
-		gap := m.width - leftW - rightW
-		if gap < 1 {
-			gap = 1
-		}
-		status = left + strings.Repeat(" ", gap) + right
-	} else {
-		status = left + "   " + right
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
 	}
 
 	out := m.viewport.View() + "\n" + status + "\n"
@@ -691,19 +676,6 @@ func (m *Model) View() string {
 	}
 	out += m.textarea.View()
 	return out
-}
-
-// renderSessionStatus returns the left-aligned session info block for
-// the status line: "session: {name} · {N msgs}".
-func (m *Model) renderSessionStatus() string {
-	if m.session == nil {
-		return "session: —"
-	}
-	name := displaySessionName(m.session)
-	if name == "" {
-		name = "untitled"
-	}
-	return fmt.Sprintf("session: %s · %d msgs", name, len(m.session.Messages))
 }
 
 // renderMenu returns the popup menu lines for the current state, or

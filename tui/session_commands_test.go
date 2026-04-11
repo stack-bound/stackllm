@@ -343,22 +343,6 @@ func TestOpenForkPicker_SetsCursorToLeaf(t *testing.T) {
 	}
 }
 
-func TestRenderSessionStatus(t *testing.T) {
-	t.Parallel()
-	m := testModel(t, newFullFakeStore())
-	m.session.Name = "My run"
-	m.session.Messages = []conversation.Message{
-		{Role: conversation.RoleUser, Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hi"}}},
-	}
-	got := m.renderSessionStatus()
-	if !strings.Contains(got, "session: My run") {
-		t.Errorf("expected session name, got %q", got)
-	}
-	if !strings.Contains(got, "1 msgs") {
-		t.Errorf("expected message count, got %q", got)
-	}
-}
-
 func TestExpandHome(t *testing.T) {
 	t.Parallel()
 	got, err := expandHome("plain/path.jsonl")
