@@ -37,6 +37,17 @@ var (
 
 	modalPromptStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("7"))
+
+	// Destructive confirms get a red border so an accidental /delete
+	// can't be mistaken for a friendly rename/export prompt.
+	confirmBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("9")).
+				Padding(1, 2)
+
+	confirmTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("9")).
+				Bold(true)
 )
 
 // openRenameModal transitions the TUI into a pre-populated rename
@@ -115,6 +126,62 @@ func (m *Model) closeModal() {
 	m.modalTitle = ""
 	m.modalPrompt = ""
 	m.state = stateIdle
+}
+
+// openConfirmModal shows a centered y/n prompt. The action closure is
+// run only if the user confirms, so callers can treat the action as
+// "the thing /delete (or any other destructive command) would do" and
+// trust it won't fire on an accidental keystroke.
+func (m *Model) openConfirmModal(title, prompt string, action func() tea.Cmd) tea.Cmd {
+	m.confirmTitle = title
+	m.confirmPrompt = prompt
+	m.confirmAction = action
+	m.state = stateConfirmModal
+	return nil
+}
+
+// confirmYes invokes the pending action (if any) and closes the
+// confirm modal.
+func (m *Model) confirmYes() tea.Cmd {
+	action := m.confirmAction
+	m.closeConfirmModal()
+	if action != nil {
+		return action()
+	}
+	return nil
+}
+
+// closeConfirmModal clears confirm state without running the action.
+func (m *Model) closeConfirmModal() {
+	m.confirmTitle = ""
+	m.confirmPrompt = ""
+	m.confirmAction = nil
+	m.state = stateIdle
+}
+
+// renderConfirmModal draws the centered y/n confirmation box. The
+// destructive colour palette (red border + red title) makes an
+// accidental /delete visually distinct from the friendlier rename /
+// export prompts.
+func (m *Model) renderConfirmModal() string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	var body strings.Builder
+	body.WriteString(confirmTitleStyle.Render(m.confirmTitle))
+	body.WriteString("\n\n")
+	body.WriteString(modalPromptStyle.Render(m.confirmPrompt))
+	body.WriteString("\n\n")
+	body.WriteString(modalHintStyle.Render("y confirm · n cancel · esc cancel"))
+
+	box := confirmBorderStyle.Render(body.String())
+
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		box,
+	)
 }
 
 // renderModal draws the centered modal composition for the current

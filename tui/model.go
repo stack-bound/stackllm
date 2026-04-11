@@ -34,6 +34,7 @@ const (
 	stateSessionPicker
 	stateForkPicker
 	stateTextModal
+	stateConfirmModal
 )
 
 // ModelLister is the subset of profile.Manager that the TUI needs to
@@ -127,6 +128,13 @@ type Model struct {
 	modalInput  textinput.Model
 	modalTitle  string
 	modalPrompt string
+
+	// Confirm modal state — a y/n prompt with a deferred action that
+	// runs when the user confirms. Used by /delete so a stray Enter
+	// can't silently throw away the current session.
+	confirmTitle  string
+	confirmPrompt string
+	confirmAction func() tea.Cmd
 
 	// Cached store capabilities, assigned once in New() so command
 	// handlers don't re-type-assert on every keypress.
@@ -255,6 +263,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stateTextModal:
 				m.closeModal()
 				skipTextarea = true
+			case stateConfirmModal:
+				m.closeConfirmModal()
+				skipTextarea = true
 			}
 		case tea.KeyUp:
 			if m.state == stateCommandMenu {
@@ -314,6 +325,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
+			if m.state == stateConfirmModal && len(msg.Runes) == 1 {
+				switch msg.Runes[0] {
+				case 'y', 'Y':
+					cmds = append(cmds, m.confirmYes())
+					skipTextarea = true
+				case 'n', 'N':
+					m.closeConfirmModal()
+					skipTextarea = true
+				}
+			}
 		case tea.KeyEnter:
 			if msg.Alt {
 				break // pass Alt+Enter to textarea for newline insertion
@@ -367,6 +388,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case stateTextModal:
 				cmds = append(cmds, m.submitModal())
+			case stateConfirmModal:
+				cmds = append(cmds, m.confirmYes())
 			default:
 				input := strings.TrimSpace(m.textarea.Value())
 				if input == "" {
@@ -567,6 +590,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
+	// While the confirm modal is open, keystrokes are fully consumed
+	// by the y/n/Esc/Enter handlers above. Short-circuit the textarea
+	// path so a stray character can't leak into the input buffer.
+	if m.state == stateConfirmModal {
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+		return m, tea.Batch(cmds...)
+	}
+
 	if !skipTextarea &&
 		m.state != stateModelPicker &&
 		m.state != stateModelLoading &&
@@ -609,6 +641,9 @@ func (m *Model) View() string {
 	// input.
 	if m.state == stateTextModal {
 		return m.renderModal()
+	}
+	if m.state == stateConfirmModal {
+		return m.renderConfirmModal()
 	}
 
 	var right string
@@ -834,9 +869,12 @@ func (m *Model) executeCommand(c Command) tea.Cmd {
 	case CommandFork:
 		return m.openForkPicker()
 	case CommandDelete:
-		cmd := m.executeDelete()
-		m.state = stateIdle
-		return cmd
+		name := displaySessionName(m.session)
+		return m.openConfirmModal(
+			"Delete session",
+			fmt.Sprintf("Delete %q? This cannot be undone.", name),
+			func() tea.Cmd { return m.executeDelete() },
+		)
 	case CommandExport:
 		return m.openExportModal()
 	}
