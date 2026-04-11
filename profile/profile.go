@@ -75,6 +75,12 @@ type ModelInfo struct {
 	// Populated by ListAllModels from each model's supported_endpoints
 	// metadata. LoadProviderForModel routes the request accordingly.
 	Endpoint string
+
+	// ContextWindow is the maximum prompt length in tokens. Populated
+	// from provider.ModelMeta.ContextWindow when the upstream /models
+	// response exposes it (Copilot), otherwise filled in from the
+	// provider.ContextWindow fallback table. Zero means unknown.
+	ContextWindow int
 }
 
 // String returns "provider/model" format.
@@ -315,10 +321,15 @@ func (m *Manager) listModelsForProvider(ctx context.Context, providerName string
 		if meta.ModelPickerEnabled != nil && !*meta.ModelPickerEnabled {
 			continue
 		}
+		cw := meta.ContextWindow
+		if cw == 0 {
+			cw = provider.ContextWindow(meta.ID)
+		}
 		out = append(out, ModelInfo{
-			Provider: providerName,
-			Model:    meta.ID,
-			Endpoint: endpointForMeta(meta),
+			Provider:      providerName,
+			Model:         meta.ID,
+			Endpoint:      endpointForMeta(meta),
+			ContextWindow: cw,
 		})
 	}
 	return out, nil
@@ -420,9 +431,10 @@ func (m *Manager) RecentModels(ctx context.Context) ([]ModelInfo, error) {
 			continue
 		}
 		out = append(out, ModelInfo{
-			Provider: r.Provider,
-			Model:    r.Model,
-			Endpoint: r.Endpoint,
+			Provider:      r.Provider,
+			Model:         r.Model,
+			Endpoint:      r.Endpoint,
+			ContextWindow: provider.ContextWindow(r.Model),
 		})
 	}
 	_ = ctx // config is local

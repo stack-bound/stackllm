@@ -93,6 +93,13 @@ type OpenAIProvider struct {
 	cfg Config
 }
 
+// Model returns the model name this provider is configured for. It's
+// the value baked into Config.Model at construction — callers that
+// override it per-request via Request.Model still win at wire time,
+// but this is the stable default surface (e.g. for the TUI status
+// line when the embedder didn't pass agent.WithModel).
+func (p *OpenAIProvider) Model() string { return p.cfg.Model }
+
 // New creates a new OpenAI-compatible provider.
 func New(cfg Config) *OpenAIProvider {
 	if cfg.MaxRetries <= 0 {
@@ -192,7 +199,12 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 			SupportedEndpoints []string `json:"supported_endpoints"`
 			ModelPickerEnabled *bool    `json:"model_picker_enabled"`
 			Capabilities       struct {
-				Type string `json:"type"`
+				Type   string `json:"type"`
+				Limits struct {
+					MaxPromptTokens  int `json:"max_prompt_tokens"`
+					MaxContextWindow int `json:"max_context_window_tokens"`
+					MaxInputTokens   int `json:"max_input_tokens"`
+				} `json:"limits"`
 			} `json:"capabilities"`
 		} `json:"data"`
 	}
@@ -202,11 +214,23 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 
 	models := make([]ModelMeta, len(result.Data))
 	for i, m := range result.Data {
+		// Prefer the most specific limit upstream reports. Copilot
+		// exposes max_prompt_tokens for chat models; a few historic
+		// variants have used max_context_window_tokens or
+		// max_input_tokens. Take whichever is non-zero first.
+		cw := m.Capabilities.Limits.MaxPromptTokens
+		if cw == 0 {
+			cw = m.Capabilities.Limits.MaxContextWindow
+		}
+		if cw == 0 {
+			cw = m.Capabilities.Limits.MaxInputTokens
+		}
 		models[i] = ModelMeta{
 			ID:                 m.ID,
 			SupportedEndpoints: m.SupportedEndpoints,
 			Type:               m.Capabilities.Type,
 			ModelPickerEnabled: m.ModelPickerEnabled,
+			ContextWindow:      cw,
 		}
 	}
 	return models, nil
@@ -242,6 +266,16 @@ func (p *OpenAIProvider) buildRequestBody(req Request) map[string]any {
 		"model":    req.Model,
 		"messages": msgs,
 		"stream":   req.Stream,
+	}
+
+	// OpenAI only emits the usage block on streamed responses when the
+	// caller opts in via stream_options.include_usage. Copilot, Gemini
+	// (OpenAI-compat) and Ollama tolerate the field — they either honour
+	// it or ignore it. Only set it on the chat completions path; the
+	// /responses endpoint carries usage on response.completed by default
+	// and rejects stream_options.
+	if req.Stream {
+		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 
 	if req.Model == "" {
@@ -494,6 +528,7 @@ func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 
 	currentKind := chatBlockNone
 	var currentText strings.Builder
+	var lastUsage *TokenUsage
 
 	closeCurrent := func() {
 		if currentKind == chatBlockNone {
@@ -568,6 +603,9 @@ func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 					},
 				}
 			}
+			if lastUsage != nil {
+				events <- Event{Type: EventTypeUsage, Usage: lastUsage}
+			}
 			events <- Event{Type: EventTypeDone}
 			return
 		}
@@ -589,10 +627,27 @@ func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
 		}
 
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
+		}
+
+		// The final chunk from an OpenAI-compatible stream carries
+		// usage in a standalone message with no choices — accept it
+		// from any chunk that has it, to be resilient to providers
+		// that interleave usage on the last choice chunk too.
+		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 || chunk.Usage.TotalTokens > 0) {
+			lastUsage = &TokenUsage{
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:      chunk.Usage.TotalTokens,
+			}
 		}
 
 		if len(chunk.Choices) == 0 {

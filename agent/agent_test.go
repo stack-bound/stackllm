@@ -508,3 +508,69 @@ func TestStep_HooksAreCalled(t *testing.T) {
 		t.Error("OnToken hook not called (should fire for BlockText deltas)")
 	}
 }
+
+// TestAgent_Model_Getter verifies that the Model() getter reflects the
+// name supplied to New and tracks SetModel. The TUI reads this field
+// to render the status line, so a stale value would silently mislabel
+// the displayed model.
+func TestAgent_Model_Getter(t *testing.T) {
+	t.Parallel()
+
+	a := New(&mockProvider{}, WithModel("gpt-4o"))
+	if got := a.Model(); got != "gpt-4o" {
+		t.Errorf("Model() after New = %q, want gpt-4o", got)
+	}
+	a.SetModel("claude-3-5-sonnet")
+	if got := a.Model(); got != "claude-3-5-sonnet" {
+		t.Errorf("Model() after SetModel = %q, want claude-3-5-sonnet", got)
+	}
+}
+
+// TestAgent_Run_ForwardsUsageEvent asserts that a provider
+// EventTypeUsage fired during a Step is forwarded as an agent
+// EventUsage on the channel returned by Run, carrying the same
+// numbers. This is the data path that ultimately lets the TUI show
+// actual token counts.
+func TestAgent_Run_ForwardsUsageEvent(t *testing.T) {
+	t.Parallel()
+
+	usage := conversation.TokenUsage{PromptTokens: 11, CompletionTokens: 3, TotalTokens: 14}
+	events := append([]provider.Event{}, textBlockEvents("hello")...)
+	events = append(events,
+		provider.Event{Type: provider.EventTypeUsage, Usage: &usage},
+		provider.Event{Type: provider.EventTypeDone},
+	)
+
+	p := &mockProvider{responses: [][]provider.Event{events}}
+	a := New(p, WithModel("test-model"), WithMaxSteps(2))
+
+	ch, err := a.Run(context.Background(), []conversation.Message{userMessage("hi")})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var gotUsage *conversation.TokenUsage
+	var sawComplete bool
+	for ev := range ch {
+		switch ev.Type {
+		case EventUsage:
+			if ev.Usage == nil {
+				t.Fatal("EventUsage had nil Usage")
+			}
+			u := *ev.Usage
+			gotUsage = &u
+		case EventComplete:
+			sawComplete = true
+		case EventError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+	if !sawComplete {
+		t.Error("never saw EventComplete")
+	}
+	if gotUsage == nil {
+		t.Fatal("never saw EventUsage")
+	}
+	if *gotUsage != usage {
+		t.Errorf("usage = %+v, want %+v", *gotUsage, usage)
+	}
+}

@@ -37,6 +37,17 @@ type ToolCall struct {
 	Arguments string
 }
 
+// TokenUsage reports how many tokens a single provider turn consumed.
+// PromptTokens is the size of the request context (the figure users
+// care about when tracking context window headroom); CompletionTokens
+// is what the model generated. TotalTokens mirrors the upstream field
+// where it's present and will equal the sum of the two otherwise.
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // ArtifactRef points at a row in an external artifacts store. The
 // referenced payload may be the full content of a tool_result block,
 // image bytes, or redacted thinking data. When ArtifactRef is non-nil

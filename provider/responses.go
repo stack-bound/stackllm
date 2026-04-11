@@ -466,6 +466,30 @@ func (p *OpenAIProvider) readResponsesSSE(body io.Reader, events chan<- Event) {
 			delete(items, payload.OutputIndex)
 
 		case "response.completed":
+			// response.completed carries the full response object,
+			// including a usage block with input/output/total token
+			// counts. Forward it as EventTypeUsage before the final
+			// EventTypeDone so downstream consumers see a consistent
+			// ordering with the chat completions path.
+			var payload struct {
+				Response struct {
+					Usage struct {
+						InputTokens  int `json:"input_tokens"`
+						OutputTokens int `json:"output_tokens"`
+						TotalTokens  int `json:"total_tokens"`
+					} `json:"usage"`
+				} `json:"response"`
+			}
+			if err := json.Unmarshal([]byte(data), &payload); err == nil {
+				u := payload.Response.Usage
+				if u.InputTokens > 0 || u.OutputTokens > 0 || u.TotalTokens > 0 {
+					events <- Event{Type: EventTypeUsage, Usage: &TokenUsage{
+						PromptTokens:     u.InputTokens,
+						CompletionTokens: u.OutputTokens,
+						TotalTokens:      u.TotalTokens,
+					}}
+				}
+			}
 			events <- Event{Type: EventTypeDone}
 			return
 

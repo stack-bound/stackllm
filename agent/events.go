@@ -12,6 +12,7 @@ const (
 	EventToken                       // convenience alias: BlockDelta filtered to BlockText
 	EventToolCall                    // tool call dispatched
 	EventToolResult                  // tool call completed
+	EventUsage                       // token usage reported for the completed step
 	EventStepDone                    // single step completed
 	EventComplete                    // agent loop finished
 	EventError                       // terminal error
@@ -27,6 +28,7 @@ const (
 //	EventToken:      Content (convenience for BlockText deltas)
 //	EventToolCall:   ToolCall
 //	EventToolResult: ToolCall, ToolResult
+//	EventUsage:      Usage
 //	EventStepDone:   Step
 //	EventComplete:   Messages
 //	EventError:      Err, Messages
@@ -34,10 +36,11 @@ type Event struct {
 	Type       EventType
 	BlockType  conversation.BlockType
 	Block      *conversation.Block
-	Content    string                 // set for EventToken and EventBlockDelta
-	ToolCall   *conversation.ToolCall // set for EventToolCall
-	ToolResult string                 // set for EventToolResult
-	Err        error                  // set for EventError
-	Step       int                    // current step number
-	Messages   []conversation.Message // set for EventComplete and EventError
+	Content    string                  // set for EventToken and EventBlockDelta
+	ToolCall   *conversation.ToolCall  // set for EventToolCall
+	ToolResult string                  // set for EventToolResult
+	Usage      *conversation.TokenUsage // set for EventUsage
+	Err        error                   // set for EventError
+	Step       int                     // current step number
+	Messages   []conversation.Message  // set for EventComplete and EventError
 }

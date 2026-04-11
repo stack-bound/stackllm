@@ -1417,6 +1417,89 @@ func TestSQLiteStore_Begin_AppliesPerTxPragmas(t *testing.T) {
 
 // TestSQLiteStore_ListReflectsStateUpdates asserts that the List
 // metadata-only path returns freshly-persisted state alongside Load.
+// TestSQLiteStore_LastUsageRoundTrip verifies that a session's
+// LastUsage is persisted on Save and rehydrated on Load, including
+// the case where LastUsage changes between saves. The TUI depends on
+// this so reopening a session restores the model/context usage
+// suffix before any new turn runs.
+func TestSQLiteStore_LastUsageRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newFileStore(t)
+
+	sess := New()
+	sess.Name = "usage-test"
+	sess.AppendMessage(conversation.Message{
+		Role:   conversation.RoleUser,
+		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hi"}},
+	})
+
+	// First save with no usage — all three columns must be NULL, and
+	// Load should round-trip that as LastUsage == nil so the TUI can
+	// distinguish "never measured" from "measured as zero".
+	if err := store.Save(ctx, sess); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+	loaded, err := store.Load(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	if loaded.LastUsage != nil {
+		t.Fatalf("LastUsage before any turn = %+v, want nil", loaded.LastUsage)
+	}
+
+	// Record a turn's worth of usage, save, load, assert round-trip.
+	sess.LastUsage = &conversation.TokenUsage{PromptTokens: 1234, CompletionTokens: 56, TotalTokens: 1290}
+	if err := store.Save(ctx, sess); err != nil {
+		t.Fatalf("save with usage: %v", err)
+	}
+	loaded, err = store.Load(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("load after usage: %v", err)
+	}
+	if loaded.LastUsage == nil {
+		t.Fatal("LastUsage was nil after save/load round-trip")
+	}
+	if *loaded.LastUsage != *sess.LastUsage {
+		t.Errorf("LastUsage round-trip = %+v, want %+v", *loaded.LastUsage, *sess.LastUsage)
+	}
+
+	// List must surface LastUsage too so any future UI that wants a
+	// sessions overview can show per-session usage without calling
+	// Load.
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found *Session
+	for _, s := range list {
+		if s.ID == sess.ID {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("session %s not in List", sess.ID)
+	}
+	if found.LastUsage == nil || *found.LastUsage != *sess.LastUsage {
+		t.Errorf("List LastUsage = %+v, want %+v", found.LastUsage, sess.LastUsage)
+	}
+
+	// Update the usage and save again without appending a message —
+	// the UPDATE path must rewrite the columns.
+	sess.LastUsage = &conversation.TokenUsage{PromptTokens: 5000, CompletionTokens: 100, TotalTokens: 5100}
+	if err := store.Save(ctx, sess); err != nil {
+		t.Fatalf("save with updated usage: %v", err)
+	}
+	loaded, err = store.Load(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("load after updated usage: %v", err)
+	}
+	if loaded.LastUsage == nil || *loaded.LastUsage != *sess.LastUsage {
+		t.Errorf("LastUsage after update = %+v, want %+v", loaded.LastUsage, sess.LastUsage)
+	}
+}
+
 // If the UPDATE ever drops state_json again, this will catch it from
 // the listing code path too.
 func TestSQLiteStore_ListReflectsStateUpdates(t *testing.T) {

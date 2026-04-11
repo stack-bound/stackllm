@@ -552,6 +552,143 @@ func TestOpenAIProvider_Models(t *testing.T) {
 	}
 }
 
+// TestOpenAIProvider_Models_ContextWindowFromCapabilities exercises
+// the Copilot-shaped metadata path: capabilities.limits.max_prompt_tokens
+// must land on ModelMeta.ContextWindow so profile.ModelInfo can
+// propagate it to the TUI without a follow-up lookup.
+func TestOpenAIProvider_Models_ContextWindowFromCapabilities(t *testing.T) {
+	t.Parallel()
+
+	body := `{"data":[
+		{"id":"with-limits","capabilities":{"type":"chat","limits":{"max_prompt_tokens":123456}}},
+		{"id":"without-limits","capabilities":{"type":"chat"}}
+	]}`
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("key"),
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "application/json", body), nil
+		}),
+	})
+
+	models, err := p.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models error: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("got %d models, want 2", len(models))
+	}
+	byID := map[string]ModelMeta{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	if got := byID["with-limits"].ContextWindow; got != 123456 {
+		t.Errorf("with-limits ContextWindow = %d, want 123456", got)
+	}
+	if got := byID["without-limits"].ContextWindow; got != 0 {
+		t.Errorf("without-limits ContextWindow = %d, want 0", got)
+	}
+}
+
+// TestOpenAIProvider_Complete_EmitsUsage verifies that a usage block
+// in the terminal SSE chunk is forwarded as EventTypeUsage before
+// EventTypeDone, using the numbers the upstream reported verbatim.
+// This is the data path the TUI relies on to display actual token
+// counts rather than a chars/4 estimate.
+func TestOpenAIProvider_Complete_EmitsUsage(t *testing.T) {
+	t.Parallel()
+
+	sseData := `data: {"choices":[{"delta":{"content":"Hi"}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}
+
+data: [DONE]
+
+`
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("key"),
+		Model:       "gpt-4o",
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+		}),
+		MaxRetries: 1,
+	})
+
+	events, err := p.Complete(context.Background(), Request{
+		Messages: []conversation.Message{userText("Hi")},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+
+	var usage *TokenUsage
+	var sawDoneAfterUsage bool
+	var sawDone bool
+	for ev := range events {
+		switch ev.Type {
+		case EventTypeUsage:
+			if ev.Usage == nil {
+				t.Fatal("EventTypeUsage had nil Usage")
+			}
+			u := *ev.Usage
+			usage = &u
+		case EventTypeDone:
+			sawDone = true
+			if usage != nil {
+				sawDoneAfterUsage = true
+			}
+		case EventTypeError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+	if !sawDone {
+		t.Error("never saw EventTypeDone")
+	}
+	if usage == nil {
+		t.Fatal("never saw EventTypeUsage")
+	}
+	if !sawDoneAfterUsage {
+		t.Error("EventTypeUsage must be emitted before EventTypeDone")
+	}
+	if usage.PromptTokens != 42 || usage.CompletionTokens != 7 || usage.TotalTokens != 49 {
+		t.Errorf("usage = %+v, want {42,7,49}", usage)
+	}
+}
+
+// TestOpenAIProvider_BuildRequestBody_IncludeUsage asserts that a
+// streamed request opts into stream_options.include_usage so OpenAI
+// actually emits a usage block. Without this flag the end-of-stream
+// is silent for prompt token accounting.
+func TestOpenAIProvider_BuildRequestBody_IncludeUsage(t *testing.T) {
+	t.Parallel()
+
+	p := New(Config{Model: "gpt-4o", TokenSource: auth.NewStatic("k")})
+
+	body := p.buildRequestBody(Request{
+		Messages: []conversation.Message{userText("hi")},
+		Stream:   true,
+	})
+	so, ok := body["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options not set or wrong type: %T", body["stream_options"])
+	}
+	if iu, _ := so["include_usage"].(bool); !iu {
+		t.Errorf("stream_options.include_usage = %v, want true", so["include_usage"])
+	}
+
+	// Non-streamed requests should omit stream_options — some
+	// backends reject it outright on non-stream calls.
+	bodyNS := p.buildRequestBody(Request{
+		Messages: []conversation.Message{userText("hi")},
+		Stream:   false,
+	})
+	if _, present := bodyNS["stream_options"]; present {
+		t.Errorf("stream_options should not be set when Stream=false, got %v", bodyNS["stream_options"])
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

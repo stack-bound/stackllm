@@ -431,12 +431,14 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 		if created.IsZero() {
 			created = now
 		}
+		promptTok, completionTok, totalTok := usageCols(sess.LastUsage)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO stackllm_sessions(
 				id, name, project_path, model,
 				metadata_json, state_json, current_leaf_id,
-				created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+				created_at, updated_at,
+				last_prompt_tokens, last_completion_tokens, last_total_tokens
+			) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
 			sess.ID,
 			nullString(sess.Name),
 			nullString(sess.ProjectPath),
@@ -445,6 +447,7 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 			stateJSON,
 			formatTime(created),
 			formatTime(now),
+			promptTok, completionTok, totalTok,
 		); err != nil {
 			return fmt.Errorf("session: Save: insert session row: %w", err)
 		}
@@ -532,10 +535,14 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 
 	// Update current_leaf_id + updated_at + mutable metadata + state.
 	// state_json MUST be written here (not only on insert) so SetState
-	// mutations after the first save actually persist.
+	// mutations after the first save actually persist. LastUsage is
+	// written here too so a caller that updates the field in memory
+	// and saves without a new turn still round-trips the new value.
+	promptTok, completionTok, totalTok := usageCols(sess.LastUsage)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE stackllm_sessions
-		SET current_leaf_id = ?, updated_at = ?, name = ?, project_path = ?, model = ?, state_json = ?
+		SET current_leaf_id = ?, updated_at = ?, name = ?, project_path = ?, model = ?, state_json = ?,
+		    last_prompt_tokens = ?, last_completion_tokens = ?, last_total_tokens = ?
 		WHERE id = ?`,
 		runningParent,
 		formatTime(now),
@@ -543,6 +550,7 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 		nullString(sess.ProjectPath),
 		nullString(sess.Model),
 		stateJSON,
+		promptTok, completionTok, totalTok,
 		sess.ID,
 	); err != nil {
 		return fmt.Errorf("session: Save: update session row: %w", err)
@@ -842,20 +850,25 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
 	}
 
 	var (
-		name         sql.NullString
-		projectPath  sql.NullString
-		model        sql.NullString
-		metadataJSON string
-		stateJSON    string
-		leafID       sql.NullString
-		created      string
-		updated      string
+		name            sql.NullString
+		projectPath     sql.NullString
+		model           sql.NullString
+		metadataJSON    string
+		stateJSON       string
+		leafID          sql.NullString
+		created         string
+		updated         string
+		promptTokens    sql.NullInt64
+		completionTokens sql.NullInt64
+		totalTokens     sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT name, project_path, model, metadata_json, state_json,
-		       current_leaf_id, created_at, updated_at
+		       current_leaf_id, created_at, updated_at,
+		       last_prompt_tokens, last_completion_tokens, last_total_tokens
 		FROM stackllm_sessions WHERE id = ?`, id,
-	).Scan(&name, &projectPath, &model, &metadataJSON, &stateJSON, &leafID, &created, &updated)
+	).Scan(&name, &projectPath, &model, &metadataJSON, &stateJSON, &leafID, &created, &updated,
+		&promptTokens, &completionTokens, &totalTokens)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("session: %q not found", id)
 	}
@@ -875,6 +888,7 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
 		ProjectPath: projectPath.String,
 		Model:       model.String,
 		State:       state,
+		LastUsage:   usageFromCols(promptTokens, completionTokens, totalTokens),
 		Created:     parseTime(created),
 		Updated:     parseTime(updated),
 	}
@@ -1207,7 +1221,8 @@ func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
 // in full.
 func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, project_path, model, state_json, created_at, updated_at
+		SELECT id, name, project_path, model, state_json, created_at, updated_at,
+		       last_prompt_tokens, last_completion_tokens, last_total_tokens
 		FROM stackllm_sessions
 		ORDER BY updated_at DESC`)
 	if err != nil {
@@ -1217,15 +1232,19 @@ func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
 	var out []*Session
 	for rows.Next() {
 		var (
-			id          string
-			name        sql.NullString
-			projectPath sql.NullString
-			model       sql.NullString
-			stateJSON   string
-			created     string
-			updated     string
+			id               string
+			name             sql.NullString
+			projectPath      sql.NullString
+			model            sql.NullString
+			stateJSON        string
+			created          string
+			updated          string
+			promptTokens     sql.NullInt64
+			completionTokens sql.NullInt64
+			totalTokens      sql.NullInt64
 		)
-		if err := rows.Scan(&id, &name, &projectPath, &model, &stateJSON, &created, &updated); err != nil {
+		if err := rows.Scan(&id, &name, &projectPath, &model, &stateJSON, &created, &updated,
+			&promptTokens, &completionTokens, &totalTokens); err != nil {
 			return nil, fmt.Errorf("session: List scan: %w", err)
 		}
 		state, err := unmarshalState(stateJSON)
@@ -1238,6 +1257,7 @@ func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
 			ProjectPath: projectPath.String,
 			Model:       model.String,
 			State:       state,
+			LastUsage:   usageFromCols(promptTokens, completionTokens, totalTokens),
 			Created:     parseTime(created),
 			Updated:     parseTime(updated),
 		})
@@ -1270,13 +1290,17 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 
 	// Read source session metadata so we can copy name/model/project.
 	var (
-		srcName, srcProject, srcModel sql.NullString
-		stateJSON                     string
+		srcName, srcProject, srcModel                sql.NullString
+		stateJSON                                    string
+		srcPromptTok, srcCompletionTok, srcTotalTok  sql.NullInt64
 	)
 	if err := tx.QueryRowContext(ctx, `
-		SELECT name, project_path, model, state_json FROM stackllm_sessions WHERE id = ?`,
+		SELECT name, project_path, model, state_json,
+		       last_prompt_tokens, last_completion_tokens, last_total_tokens
+		FROM stackllm_sessions WHERE id = ?`,
 		srcSessionID,
-	).Scan(&srcName, &srcProject, &srcModel, &stateJSON); err != nil {
+	).Scan(&srcName, &srcProject, &srcModel, &stateJSON,
+		&srcPromptTok, &srcCompletionTok, &srcTotalTok); err != nil {
 		return nil, fmt.Errorf("session: Fork: read source: %w", err)
 	}
 
@@ -1287,8 +1311,9 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 		INSERT INTO stackllm_sessions(
 			id, name, project_path, model,
 			metadata_json, state_json, current_leaf_id,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+			created_at, updated_at,
+			last_prompt_tokens, last_completion_tokens, last_total_tokens
+		) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
 		newID,
 		nullString(newName),
 		srcProject,
@@ -1297,6 +1322,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 		stateJSON,
 		formatTime(now),
 		formatTime(now),
+		srcPromptTok, srcCompletionTok, srcTotalTok,
 	); err != nil {
 		return nil, fmt.Errorf("session: Fork: insert session: %w", err)
 	}
@@ -1751,12 +1777,16 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 	if err != nil {
 		return "", fmt.Errorf("session: Import: state: %w", err)
 	}
+	// Import does not carry usage forward — the imported JSONL format
+	// pre-dates LastUsage and the three columns stay NULL until the
+	// caller runs another turn.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO stackllm_sessions(
 			id, name, project_path, model,
 			metadata_json, state_json, current_leaf_id,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+			created_at, updated_at,
+			last_prompt_tokens, last_completion_tokens, last_total_tokens
+		) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`,
 		newID,
 		nullString(name),
 		nullString(projectPath),
@@ -1883,6 +1913,32 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// usageCols unpacks a *TokenUsage into three sql.NullInt64 values for
+// binding into the last_prompt_tokens / last_completion_tokens /
+// last_total_tokens columns. A nil usage becomes three NULLs.
+func usageCols(u *conversation.TokenUsage) (sql.NullInt64, sql.NullInt64, sql.NullInt64) {
+	if u == nil {
+		return sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(u.PromptTokens), Valid: true},
+		sql.NullInt64{Int64: int64(u.CompletionTokens), Valid: true},
+		sql.NullInt64{Int64: int64(u.TotalTokens), Valid: true}
+}
+
+// usageFromCols rebuilds a *TokenUsage from three scanned columns.
+// Returns nil when every column is NULL — the sentinel for "no usage
+// recorded yet" that LastUsage exposes to callers.
+func usageFromCols(prompt, completion, total sql.NullInt64) *conversation.TokenUsage {
+	if !prompt.Valid && !completion.Valid && !total.Valid {
+		return nil
+	}
+	return &conversation.TokenUsage{
+		PromptTokens:     int(prompt.Int64),
+		CompletionTokens: int(completion.Int64),
+		TotalTokens:      int(total.Int64),
+	}
 }
 
 // formatTime / parseTime use RFC3339Nano so times survive a DB

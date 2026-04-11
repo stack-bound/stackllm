@@ -118,6 +118,14 @@ type Model struct {
 	nextImageIdx    int
 	clipboardReader ClipboardReader
 
+	// Model + context-window display state. currentModel mirrors
+	// agent.Model() at construction and after /models switches;
+	// contextWindow is the resolved max-prompt limit for that model
+	// (upstream metadata first, provider.ContextWindow fallback
+	// otherwise). Zero means unknown.
+	currentModel  string
+	contextWindow int
+
 	// Styles
 	userStyle      lipgloss.Style
 	assistantStyle lipgloss.Style
@@ -165,6 +173,8 @@ func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 		state:           stateIdle,
 		pendingImages:   map[int]pendingImage{},
 		clipboardReader: defaultClipboardReader,
+		currentModel:    a.Model(),
+		contextWindow:   provider.ContextWindow(a.Model()),
 		userStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
 		assistantStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
 		toolStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
@@ -375,6 +385,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.agent.SetProvider(msg.provider)
 		m.agent.SetModel(msg.info.Model)
+		// Refresh the cached model/context info so the status line
+		// reflects the new selection on the next View(). The ModelInfo
+		// from the picker carries ContextWindow either from upstream
+		// metadata or the hardcoded table; if it is still zero (e.g.
+		// because the picker was fed an older config), ask the
+		// fallback table one last time.
+		m.currentModel = msg.info.Model
+		if cw := msg.info.ContextWindow; cw > 0 {
+			m.contextWindow = cw
+		} else {
+			m.contextWindow = provider.ContextWindow(msg.info.Model)
+		}
 		// Persist the selection to the recent-models list so it
 		// surfaces at the top of the picker next time. Best effort:
 		// an error here should not block the switch.
@@ -438,7 +460,13 @@ func (m *Model) View() string {
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
 	}
 
-	out := m.viewport.View() + "\n" + status + "\n"
+	suffix := formatModelStatus(m.currentModel, m.session.LastUsage, m.contextWindow)
+	if suffix != "" {
+		suffix = statusSuffixStyle.Render(suffix)
+	}
+	statusLine := padBetween(status, suffix, m.width)
+
+	out := m.viewport.View() + "\n" + statusLine + "\n"
 	if menu := m.renderMenu(); menu != "" {
 		out += menu + "\n"
 	}
@@ -737,6 +765,11 @@ func (m *Model) runAgent() tea.Cmd {
 				m.appendOutput(m.toolStyle.Render("⚡ "+ev.ToolCall.Name) + "\n")
 			case agent.EventToolResult:
 				m.appendOutput(m.toolStyle.Render("  → "+truncate(ev.ToolResult, 200)) + "\n")
+			case agent.EventUsage:
+				if ev.Usage != nil {
+					usage := *ev.Usage
+					m.session.LastUsage = &usage
+				}
 			case agent.EventComplete:
 				m.session.Messages = append([]conversation.Message(nil), ev.Messages...)
 			case agent.EventError:

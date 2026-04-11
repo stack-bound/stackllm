@@ -1236,10 +1236,14 @@ func TestRecentModels_RoundTrip(t *testing.T) {
 	}
 
 	// Most-recent-first order: gpt-5.4-mini, claude-opus-4.6, gpt-4o.
+	// RecentModels backfills ContextWindow from provider's hardcoded
+	// table so the UI can show context usage for recents without a
+	// live /models query — mirror that in the expected values by
+	// calling the same function rather than hardcoding token counts.
 	wantOrder := []ModelInfo{
-		{Provider: "openai", Model: "gpt-5.4-mini", Endpoint: provider.EndpointResponses},
-		{Provider: "copilot", Model: "claude-opus-4.6"},
-		{Provider: "openai", Model: "gpt-4o"},
+		{Provider: "openai", Model: "gpt-5.4-mini", Endpoint: provider.EndpointResponses, ContextWindow: provider.ContextWindow("gpt-5.4-mini")},
+		{Provider: "copilot", Model: "claude-opus-4.6", ContextWindow: provider.ContextWindow("claude-opus-4.6")},
+		{Provider: "openai", Model: "gpt-4o", ContextWindow: provider.ContextWindow("gpt-4o")},
 	}
 	if len(recents) != len(wantOrder) {
 		t.Fatalf("got %d recents, want %d (%v)", len(recents), len(wantOrder), recents)

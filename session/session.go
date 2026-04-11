@@ -12,15 +12,21 @@ import (
 // SQLiteStore so List can return them without loading the full
 // conversation; they are optional and may be left zero by embedders
 // that don't need them.
+//
+// LastUsage is the token usage reported by the most recent provider
+// turn. It is nil until the first turn completes and is persisted by
+// SQLiteStore so reopening a session restores the correct figures
+// without a round-trip to the model.
 type Session struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name,omitempty"`
-	ProjectPath string                 `json:"project_path,omitempty"`
-	Model       string                 `json:"model,omitempty"`
-	Messages    []conversation.Message `json:"messages"`
-	State       map[string]any         `json:"state"`
-	Created     time.Time              `json:"created"`
-	Updated     time.Time              `json:"updated"`
+	ID          string                   `json:"id"`
+	Name        string                   `json:"name,omitempty"`
+	ProjectPath string                   `json:"project_path,omitempty"`
+	Model       string                   `json:"model,omitempty"`
+	Messages    []conversation.Message   `json:"messages"`
+	State       map[string]any           `json:"state"`
+	LastUsage   *conversation.TokenUsage `json:"last_usage,omitempty"`
+	Created     time.Time                `json:"created"`
+	Updated     time.Time                `json:"updated"`
 }
 
 // New creates a new session with a fresh UUIDv7 ID (via

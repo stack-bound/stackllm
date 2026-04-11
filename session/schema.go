@@ -3,7 +3,7 @@ package session
 // latestSchemaVersion is the current version of the stackllm SQLite
 // schema. Opening a DB whose stored version exceeds this value is a
 // hard error — the caller must upgrade stackllm.
-const latestSchemaVersion = 1
+const latestSchemaVersion = 2
 
 // defaultArtifactThreshold is the byte size above which a
 // BlockToolResult's text payload is offloaded to stackllm_artifacts
@@ -108,10 +108,20 @@ BEGIN
 END;
 `
 
+// schemaV2 adds per-session token usage columns so that the TUI can
+// restore the "N / MAX (pct%)" display when reopening a session
+// without having to re-run a turn to learn the numbers.
+const schemaV2 = `
+ALTER TABLE stackllm_sessions ADD COLUMN last_prompt_tokens INTEGER;
+ALTER TABLE stackllm_sessions ADD COLUMN last_completion_tokens INTEGER;
+ALTER TABLE stackllm_sessions ADD COLUMN last_total_tokens INTEGER;
+`
+
 // migrations is the ordered list of schema migrations. Index i is the
 // SQL that upgrades the DB from version i to version i+1, so
 // migrations[0] applies to a fresh (version-0) database. To add a
 // migration: append the SQL here and bump latestSchemaVersion.
 var migrations = []string{
 	schemaV1,
+	schemaV2,
 }

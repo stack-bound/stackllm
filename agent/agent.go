@@ -51,6 +51,23 @@ func (a *Agent) SetProvider(p provider.Provider) { a.provider = p }
 // responsible for ensuring no concurrent Run is in progress.
 func (a *Agent) SetModel(model string) { a.opts.model = model }
 
+// Model returns the model name the agent will use on its next
+// Step/Run. It mirrors whatever the most recent New / SetModel call
+// set, with a fallback to the provider's own configured model when
+// the agent was built without WithModel — that's the common pattern
+// for single-model embedders, and without the fallback the TUI
+// status line would show nothing.
+func (a *Agent) Model() string {
+	if a.opts.model != "" {
+		return a.opts.model
+	}
+	type modeled interface{ Model() string }
+	if p, ok := a.provider.(modeled); ok {
+		return p.Model()
+	}
+	return ""
+}
+
 // Step executes one complete LLM round-trip plus tool dispatch.
 //
 // It takes the current conversation, calls the provider, collects the
@@ -108,6 +125,10 @@ func (a *Agent) Step(ctx context.Context, msgs []conversation.Message) ([]conver
 			// block itself has already been appended via BlockEnd.
 			if ev.Call != nil && a.opts.hooks.OnToolCall != nil {
 				a.opts.hooks.OnToolCall(ctx, *ev.Call)
+			}
+		case provider.EventTypeUsage:
+			if ev.Usage != nil && a.opts.hooks.OnUsage != nil {
+				a.opts.hooks.OnUsage(ctx, *ev.Usage)
 			}
 		case provider.EventTypeError:
 			return msgs, StepResult{}, fmt.Errorf("agent: provider error: %w", ev.Err)
@@ -253,6 +274,15 @@ func (a *Agent) Run(ctx context.Context, msgs []conversation.Message) (<-chan Ev
 				}
 			}
 
+			origOnUsage := a.opts.hooks.OnUsage
+			a.opts.hooks.OnUsage = func(ctx context.Context, usage conversation.TokenUsage) {
+				usageCopy := usage
+				events <- Event{Type: EventUsage, Usage: &usageCopy, Step: step}
+				if origOnUsage != nil {
+					origOnUsage(ctx, usage)
+				}
+			}
+
 			var result StepResult
 			var err error
 			msgs, result, err = a.Step(ctx, msgs)
@@ -264,6 +294,7 @@ func (a *Agent) Run(ctx context.Context, msgs []conversation.Message) (<-chan Ev
 			a.opts.hooks.OnToken = origOnToken
 			a.opts.hooks.OnToolCall = origOnToolCall
 			a.opts.hooks.OnToolResult = origOnToolResult
+			a.opts.hooks.OnUsage = origOnUsage
 
 			if err != nil {
 				events <- Event{Type: EventError, Err: err, Step: step, Messages: msgs}

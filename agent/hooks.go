@@ -34,6 +34,11 @@ type Hooks struct {
 	// Called after a tool returns (before appending to conversation).
 	OnToolResult func(ctx context.Context, call conversation.ToolCall, result string, err error)
 
+	// Called after the provider reports token usage for a turn. The
+	// usage argument is the same values that will be surfaced on
+	// agent.EventUsage from Run.
+	OnUsage func(ctx context.Context, usage conversation.TokenUsage)
+
 	// Called when the agent loop completes (naturally or via MaxSteps).
 	AfterComplete func(ctx context.Context, msgs []conversation.Message)
 }

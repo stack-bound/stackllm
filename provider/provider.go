@@ -36,6 +36,7 @@ const (
 	EventTypeBlockDelta                  // incremental content for the currently open block
 	EventTypeBlockEnd                    // the currently open block has closed
 	EventTypeToolCall                    // convenience: fired after BlockEnd for a BlockToolUse
+	EventTypeUsage                       // token usage report for this turn; fires once, before EventTypeDone
 	EventTypeDone                        // stream finished, no error
 	EventTypeError                       // terminal error
 )
@@ -56,6 +57,10 @@ const (
 // ToolCall is an alias for conversation.ToolCall.
 type ToolCall = conversation.ToolCall
 
+// TokenUsage is an alias for conversation.TokenUsage so callers in the
+// provider package can refer to it without an extra import.
+type TokenUsage = conversation.TokenUsage
+
 // Event is a single item in the streaming response.
 //
 // Field population by Type:
@@ -64,6 +69,7 @@ type ToolCall = conversation.ToolCall
 //	EventTypeBlockDelta: BlockType, Content (the partial content string)
 //	EventTypeBlockEnd:   BlockType, Block (the fully accumulated block)
 //	EventTypeToolCall:   Call (convenience copy of the closed tool_use block)
+//	EventTypeUsage:      Usage (token usage for this turn)
 //	EventTypeDone:       (no fields)
 //	EventTypeError:      Err
 type Event struct {
@@ -72,6 +78,7 @@ type Event struct {
 	Content   string              // set for EventTypeBlockDelta
 	Block     *conversation.Block // set for EventTypeBlockEnd
 	Call      *ToolCall           // set for EventTypeToolCall
+	Usage     *TokenUsage         // set for EventTypeUsage
 	Err       error               // set for EventTypeError
 }
 
@@ -103,11 +110,18 @@ type Request struct {
 // models, etc., and should not appear in user-facing pickers. The
 // field is a pointer so callers can distinguish "explicitly disabled"
 // (false) from "not set by upstream" (nil) — only Copilot exposes it.
+//
+// ContextWindow is the maximum prompt length in tokens for this model,
+// populated from capabilities.limits.max_prompt_tokens on Copilot. It
+// is zero for providers that do not expose this field; callers that
+// need a value for unknown models should fall back to
+// provider.ContextWindow(ID).
 type ModelMeta struct {
 	ID                 string
 	SupportedEndpoints []string
 	Type               string
 	ModelPickerEnabled *bool
+	ContextWindow      int
 }
 
 // Provider makes LLM calls and returns a stream of events.

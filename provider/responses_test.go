@@ -641,6 +641,59 @@ func TestMessagesToInput_ToolMessageMissingID(t *testing.T) {
 	}
 }
 
+// TestReadResponsesSSE_EmitsUsage asserts that the usage block on a
+// response.completed event is emitted as EventTypeUsage before
+// EventTypeDone, with /responses' input_tokens/output_tokens mapped
+// onto the canonical PromptTokens/CompletionTokens shape.
+func TestReadResponsesSSE_EmitsUsage(t *testing.T) {
+	t.Parallel()
+
+	stream := "event: response.output_text.delta\n" +
+		`data: {"output_index":0,"delta":"hi"}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"response":{"status":"completed","usage":{"input_tokens":111,"output_tokens":22,"total_tokens":133}}}` + "\n\n"
+
+	p := &OpenAIProvider{}
+	events := make(chan Event, 16)
+	go func() {
+		defer close(events)
+		p.readResponsesSSE(strings.NewReader(stream), events)
+	}()
+
+	var usage *TokenUsage
+	var sawDone bool
+	var doneAfterUsage bool
+	for ev := range events {
+		switch ev.Type {
+		case EventTypeUsage:
+			if ev.Usage == nil {
+				t.Fatal("EventTypeUsage had nil Usage")
+			}
+			u := *ev.Usage
+			usage = &u
+		case EventTypeDone:
+			sawDone = true
+			if usage != nil {
+				doneAfterUsage = true
+			}
+		case EventTypeError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+	if !sawDone {
+		t.Error("expected done event")
+	}
+	if usage == nil {
+		t.Fatal("expected EventTypeUsage")
+	}
+	if !doneAfterUsage {
+		t.Error("EventTypeUsage must be emitted before EventTypeDone")
+	}
+	if usage.PromptTokens != 111 || usage.CompletionTokens != 22 || usage.TotalTokens != 133 {
+		t.Errorf("usage = %+v, want {111,22,133}", usage)
+	}
+}
+
 func TestReadResponsesSSE_HandlesLargeCompletedPayload(t *testing.T) {
 	t.Parallel()
 
