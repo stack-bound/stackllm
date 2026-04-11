@@ -2,6 +2,20 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.2.0] - 2026-04-11
+### Added
+- TUI `/help` command listing all available slash commands with descriptions
+- TUI `/sessions` command to browse, switch, and delete persisted sessions from a keyboard-driven picker
+- TUI `/rename` command with a centered modal for renaming the current session
+- TUI `/fork` command with a message picker for branching the current session at any point in its history
+- TUI `/delete` command to remove the current session and start fresh
+- TUI `/export` command for saving the current session to a JSONL file
+- Session indicator in the TUI status bar showing the current session name and message count
+- TUI image paste: Ctrl+V reads the system clipboard via wl-paste / xclip / pngpaste / osascript / powershell.exe, inserts a `[Image #N]` placeholder into the textarea, and emits an interleaved `BlockImage` on send so all five OpenAI-compatible backends receive the bytes as a base64 data URI. Falls back transparently to the default text paste when the clipboard holds no image or the platform tools are unavailable.
+- TUI status line now shows the current model and context usage right-aligned (e.g. `gpt-5.4 · 12,345 / 200,000 (6.2%)`). Token counts come from actual provider `usage` fields (opts into `stream_options.include_usage` on chat completions; reads `response.completed.usage` on `/responses`), and the max context length is read from `capabilities.limits.max_prompt_tokens` where the provider exposes it (Copilot) with a hardcoded fallback table covering the GPT / Claude / Gemini / Llama / Mistral / Qwen / DeepSeek families. Per-session `LastUsage` is persisted via SQLite schema v2 so reopening a session restores the figures without a round-trip to the model.
+### Changed
+- TUI example now uses the SQLite-backed session store so sessions persist across runs
+
 ## [0.1.0] - 2026-04-10
 ### Added
 - Block-shaped messages: every Message now holds an ordered slice of typed blocks (text, thinking, redacted_thinking, image, tool_use, tool_result), so interleaved assistant output replays faithfully through every layer — providers, agent loop, TUI, web SSE, and the session store.
