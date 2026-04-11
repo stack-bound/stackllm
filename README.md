@@ -153,7 +153,7 @@ Runnable examples live in `examples/`.
 | `examples/login` | Interactive CLI for provider management — login, logout, status, browse models, and set the default. Subcommand shortcuts (`login copilot`, `status`, `models`, `default copilot/gpt-4o`) for scripting. |
 | `examples/simple` | Minimal agent with `greet` and `add` tools. Walks the user through provider login and model selection on first run, then uses the persisted default on subsequent runs. |
 | `examples/copilot` | Direct Copilot wiring without the manager — shows the two-phase GitHub device flow and caching token source. |
-| `examples/tui` | Full Bubbletea TUI agent. Streams tokens as they arrive, renders tool calls and results inline, and supports slash commands: `/models` to switch provider/model at runtime (with recently-used models surfaced first), `/new` to start a fresh session. Uses the persisted default or falls back to `OPENAI_API_KEY`. |
+| `examples/tui` | Full Bubbletea TUI agent. Streams tokens as they arrive, renders tool calls and results inline, supports Ctrl+V image paste (inserts a `[Image #N]` placeholder and attaches a `BlockImage` on send), and supports slash commands: `/models` to switch provider/model at runtime (with recently-used models surfaced first), `/new` to start a fresh session. Uses the persisted default or falls back to `OPENAI_API_KEY`. |
 | `examples/sqlite` | Shared-DB demo for `session.SQLiteStore`: opens a single SQLite file, runs a parent-app migration (`memories` table), hands the same `*sql.DB` to `session.NewSQLiteStore`, saves a conversation, and queries both namespaces to prove coexistence. No network calls — usable as a CI smoke test. |
 
 Run any of them with `go run ./examples/<name>`.

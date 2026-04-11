@@ -1,0 +1,16 @@
+deployment:
+  - ""
+added:
+  - "TUI image paste: Ctrl+V reads the system clipboard via wl-paste / xclip / pngpaste / osascript / powershell.exe, inserts a `[Image #N]` placeholder into the textarea, and emits an interleaved `BlockImage` on send so all five OpenAI-compatible backends receive the bytes as a base64 data URI. Falls back transparently to the default text paste when the clipboard holds no image or the platform tools are unavailable."
+changed:
+  - ""
+deprecated:
+  - ""
+removed:
+  - ""
+fixed:
+  - ""
+security:
+  - ""
+yanked:
+  - ""
