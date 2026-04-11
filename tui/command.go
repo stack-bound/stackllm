@@ -11,15 +11,27 @@ type Command struct {
 
 // Command identifiers.
 const (
-	CommandModels = "models"
-	CommandNew    = "new"
+	CommandHelp     = "help"
+	CommandSessions = "sessions"
+	CommandNew      = "new"
+	CommandRename   = "rename"
+	CommandFork     = "fork"
+	CommandDelete   = "delete"
+	CommandExport   = "export"
+	CommandModels   = "models"
 )
 
 // commands is the canonical list of slash commands surfaced in the popup
 // menu. Order is preserved when nothing has been typed after "/".
 var commands = []Command{
-	{ID: CommandModels, Name: "/models", Description: "Switch model or provider"},
+	{ID: CommandHelp, Name: "/help", Description: "Show available commands"},
+	{ID: CommandSessions, Name: "/sessions", Description: "Browse and switch sessions"},
 	{ID: CommandNew, Name: "/new", Description: "Start a fresh session"},
+	{ID: CommandRename, Name: "/rename", Description: "Rename the current session"},
+	{ID: CommandFork, Name: "/fork", Description: "Fork the current session at a chosen message"},
+	{ID: CommandDelete, Name: "/delete", Description: "Delete the current session"},
+	{ID: CommandExport, Name: "/export", Description: "Save the current session as JSONL"},
+	{ID: CommandModels, Name: "/models", Description: "Switch model or provider"},
 }
 
 // filterCommands returns the commands whose Name contains query as a

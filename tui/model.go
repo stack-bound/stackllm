@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -29,6 +30,10 @@ const (
 	stateCommandMenu
 	stateModelLoading
 	stateModelPicker
+	stateSessionLoading
+	stateSessionPicker
+	stateForkPicker
+	stateTextModal
 )
 
 // ModelLister is the subset of profile.Manager that the TUI needs to
@@ -108,12 +113,32 @@ type Model struct {
 	modelRecentCount int
 	modelLister      ModelLister
 
+	// Session picker state.
+	sessions             []*session.Session
+	sessionCursor        int
+	sessionVisibleOffset int
+
+	// Fork picker state — the message list comes straight from
+	// m.session.Messages, so we only need the cursor index.
+	forkCursor int
+
+	// Text modal state shared by /rename and /export.
+	modalKind   modalKind
+	modalInput  textinput.Model
+	modalTitle  string
+	modalPrompt string
+
+	// Cached store capabilities, assigned once in New() so command
+	// handlers don't re-type-assert on every keypress.
+	forker   SessionForker
+	exporter SessionExporter
+
 	// Styles
-	userStyle      lipgloss.Style
-	assistantStyle lipgloss.Style
-	toolStyle      lipgloss.Style
-	errorStyle     lipgloss.Style
-	menuStyle      lipgloss.Style
+	userStyle       lipgloss.Style
+	assistantStyle  lipgloss.Style
+	toolStyle       lipgloss.Style
+	errorStyle      lipgloss.Style
+	menuStyle       lipgloss.Style
 	menuCursorStyle lipgloss.Style
 }
 
@@ -145,6 +170,9 @@ func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 
+	ti := textinput.New()
+	ti.CharLimit = 200
+
 	m := &Model{
 		agent:           a,
 		session:         session.New(),
@@ -153,12 +181,22 @@ func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 		viewport:        vp,
 		spinner:         sp,
 		state:           stateIdle,
+		modalInput:      ti,
 		userStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
 		assistantStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
 		toolStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
 		errorStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true),
 		menuStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("7")),
 		menuCursorStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
+	}
+	// Cache capability interfaces once — handlers rely on these being
+	// set (or nil for unsupported stores) rather than re-asserting on
+	// every keystroke.
+	if f, ok := store.(SessionForker); ok {
+		m.forker = f
+	}
+	if e, ok := store.(SessionExporter); ok {
+		m.exporter = e
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -204,6 +242,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// allow cancel of loading by returning to idle
 				m.state = stateIdle
 				skipTextarea = true
+			case stateSessionPicker, stateSessionLoading:
+				m.sessions = nil
+				m.sessionCursor = 0
+				m.sessionVisibleOffset = 0
+				m.state = stateIdle
+				skipTextarea = true
+			case stateForkPicker:
+				m.forkCursor = 0
+				m.state = stateIdle
+				skipTextarea = true
+			case stateTextModal:
+				m.closeModal()
+				skipTextarea = true
 			}
 		case tea.KeyUp:
 			if m.state == stateCommandMenu {
@@ -215,6 +266,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == stateModelPicker {
 				if m.modelCursor > 0 {
 					m.modelCursor--
+				}
+				skipTextarea = true
+			}
+			if m.state == stateSessionPicker {
+				if m.sessionCursor > 0 {
+					m.sessionCursor--
+				}
+				skipTextarea = true
+			}
+			if m.state == stateForkPicker {
+				if m.forkCursor > 0 {
+					m.forkCursor--
 				}
 				skipTextarea = true
 			}
@@ -231,13 +294,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
+			if m.state == stateSessionPicker {
+				if m.sessionCursor < len(m.sessions)-1 {
+					m.sessionCursor++
+				}
+				skipTextarea = true
+			}
+			if m.state == stateForkPicker {
+				if m.forkCursor < len(m.session.Messages)-1 {
+					m.forkCursor++
+				}
+				skipTextarea = true
+			}
+		case tea.KeyRunes:
+			if m.state == stateSessionPicker && len(msg.Runes) == 1 && msg.Runes[0] == 'd' {
+				if len(m.sessions) > 0 {
+					target := m.sessions[m.sessionCursor]
+					cmds = append(cmds, m.deleteSession(target.ID))
+				}
+				skipTextarea = true
+			}
 		case tea.KeyEnter:
 			if msg.Alt {
 				break // pass Alt+Enter to textarea for newline insertion
 			}
 			skipTextarea = true // consume plain Enter, don't let textarea add a newline
 			switch m.state {
-			case stateRunning, stateToolCall, stateModelLoading:
+			case stateRunning, stateToolCall, stateModelLoading, stateSessionLoading:
 				// ignore Enter while busy
 			case stateCommandMenu:
 				if len(m.cmdFiltered) > 0 {
@@ -253,6 +336,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateModelLoading
 					cmds = append(cmds, m.switchModel(selected))
 				}
+			case stateSessionPicker:
+				if len(m.sessions) > 0 {
+					selected := m.sessions[m.sessionCursor]
+					// If the user hit Enter on the already-loaded
+					// session, there's no need to do any work —
+					// just close the picker.
+					if selected.ID == m.session.ID {
+						m.sessions = nil
+						m.sessionCursor = 0
+						m.state = stateIdle
+						break
+					}
+					m.state = stateSessionLoading
+					cmds = append(cmds, m.loadSession(selected.ID))
+				}
+			case stateForkPicker:
+				if len(m.session.Messages) > 0 {
+					msgs := m.session.Messages
+					idx := m.forkCursor
+					if idx < 0 {
+						idx = 0
+					}
+					if idx >= len(msgs) {
+						idx = len(msgs) - 1
+					}
+					target := msgs[idx]
+					cmds = append(cmds, m.forkAt(target.ID, idx+1))
+					m.state = stateSessionLoading
+				}
+			case stateTextModal:
+				cmds = append(cmds, m.submitModal())
 			default:
 				input := strings.TrimSpace(m.textarea.Value())
 				if input == "" {
@@ -286,7 +400,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case spinner.TickMsg:
-		if m.state == stateRunning || m.state == stateToolCall || m.state == stateModelLoading {
+		if m.state == stateRunning || m.state == stateToolCall || m.state == stateModelLoading || m.state == stateSessionLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
@@ -338,10 +452,127 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.appendOutput(m.toolStyle.Render("Switched to "+msg.info.String()) + "\n\n")
 		m.state = stateIdle
+
+	case sessionsLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.appendOutput(m.errorStyle.Render("✗ /sessions: "+msg.err.Error()) + "\n\n")
+			m.state = stateIdle
+			break
+		}
+		m.sessions = msg.sessions
+		// Default the cursor to the currently-loaded session so
+		// Enter on the freshly-opened picker is a no-op rather than
+		// a jarring switch to a random entry.
+		m.sessionCursor = 0
+		for i, s := range m.sessions {
+			if s.ID == m.session.ID {
+				m.sessionCursor = i
+				break
+			}
+		}
+		m.sessionVisibleOffset = 0
+		if len(m.sessions) == 0 {
+			m.appendOutput(m.toolStyle.Render("No saved sessions yet.") + "\n\n")
+			m.state = stateIdle
+			break
+		}
+		m.state = stateSessionPicker
+
+	case sessionLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.appendOutput(m.errorStyle.Render("✗ /sessions: "+msg.err.Error()) + "\n\n")
+			m.state = stateIdle
+			break
+		}
+		m.session = msg.session
+		m.output.Reset()
+		m.output.WriteString(RenderConversation(msg.session.Messages))
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+		m.sessions = nil
+		m.sessionCursor = 0
+		m.state = stateIdle
+		m.appendOutput(m.toolStyle.Render(fmt.Sprintf("✓ loaded session %q (%d messages)", displaySessionName(msg.session), len(msg.session.Messages))) + "\n\n")
+
+	case sessionDeletedMsg:
+		if msg.err != nil {
+			m.appendOutput(m.errorStyle.Render("✗ /sessions: "+msg.err.Error()) + "\n\n")
+			break
+		}
+		// Drop the deleted row from the open picker and fix the
+		// cursor so it doesn't fall off the end.
+		filtered := m.sessions[:0]
+		for _, s := range m.sessions {
+			if s.ID != msg.deletedID {
+				filtered = append(filtered, s)
+			}
+		}
+		m.sessions = filtered
+		if m.sessionCursor >= len(m.sessions) {
+			m.sessionCursor = len(m.sessions) - 1
+		}
+		if m.sessionCursor < 0 {
+			m.sessionCursor = 0
+		}
+		if msg.deletedSelf {
+			// Reset the loaded session so the status bar and
+			// viewport stop referencing the now-gone session.
+			m.executeNewSession()
+		}
+		if len(m.sessions) == 0 {
+			m.state = stateIdle
+			m.appendOutput(m.toolStyle.Render("✓ deleted — no saved sessions remain") + "\n\n")
+		} else {
+			m.appendOutput(m.toolStyle.Render("✓ session deleted") + "\n")
+		}
+
+	case sessionForkedMsg:
+		if msg.err != nil {
+			m.appendOutput(m.errorStyle.Render("✗ /fork: "+msg.err.Error()) + "\n\n")
+			m.state = stateIdle
+			break
+		}
+		// Reload the forked session through Load so we pull the
+		// canonical message chain (with fresh IDs and hydrated
+		// block rows) from the store rather than trusting whatever
+		// the in-memory return shape of Fork was.
+		m.session = msg.session
+		// Fork() returns the session with its message chain
+		// already populated from the store walk, so we can render
+		// directly without a second round-trip.
+		m.output.Reset()
+		m.output.WriteString(RenderConversation(msg.session.Messages))
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+		m.state = stateIdle
+		m.appendOutput(m.toolStyle.Render(fmt.Sprintf("✓ forked from message [%d] · %d messages copied", msg.atIndex, len(msg.session.Messages))) + "\n\n")
 	}
 
 	var cmd tea.Cmd
-	if !skipTextarea && m.state != stateModelPicker && m.state != stateModelLoading {
+
+	// While the text modal is open, keystrokes go to the modal input
+	// instead of the textarea. Enter/Esc are consumed above; anything
+	// else (characters, cursor movement, backspace) flows into the
+	// textinput. This keeps the modal visually and logically isolated
+	// from the rest of the UI.
+	if m.state == stateTextModal {
+		if !skipTextarea {
+			m.modalInput, cmd = m.modalInput.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+		return m, tea.Batch(cmds...)
+	}
+
+	if !skipTextarea &&
+		m.state != stateModelPicker &&
+		m.state != stateModelLoading &&
+		m.state != stateSessionPicker &&
+		m.state != stateSessionLoading &&
+		m.state != stateForkPicker {
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 
@@ -373,22 +604,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View implements tea.Model.
 func (m *Model) View() string {
-	var status string
+	// The text modal is rendered full-screen and bypasses the normal
+	// viewport/textarea chrome so the user's focus is 100% on the
+	// input.
+	if m.state == stateTextModal {
+		return m.renderModal()
+	}
+
+	var right string
 	switch m.state {
 	case stateRunning:
-		status = m.spinner.View() + " thinking..."
+		right = m.spinner.View() + " thinking..."
 	case stateToolCall:
-		status = m.spinner.View() + " running tool..."
+		right = m.spinner.View() + " running tool..."
 	case stateModelLoading:
-		status = m.spinner.View() + " loading models..."
+		right = m.spinner.View() + " loading models..."
+	case stateSessionLoading:
+		right = m.spinner.View() + " loading sessions..."
 	case stateCommandMenu:
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
 	case stateModelPicker:
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
+	case stateSessionPicker:
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a session")
+	case stateForkPicker:
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select fork point")
 	case stateError:
-		status = m.errorStyle.Render("● error: " + m.err.Error())
+		right = m.errorStyle.Render("● error: " + m.err.Error())
 	default:
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
+		right = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
+	}
+
+	left := m.menuStyle.Render(m.renderSessionStatus())
+
+	var status string
+	if m.width > 0 {
+		rightW := lipgloss.Width(right)
+		leftW := lipgloss.Width(left)
+		gap := m.width - leftW - rightW
+		if gap < 1 {
+			gap = 1
+		}
+		status = left + strings.Repeat(" ", gap) + right
+	} else {
+		status = left + "   " + right
 	}
 
 	out := m.viewport.View() + "\n" + status + "\n"
@@ -399,6 +658,19 @@ func (m *Model) View() string {
 	return out
 }
 
+// renderSessionStatus returns the left-aligned session info block for
+// the status line: "session: {name} · {N msgs}".
+func (m *Model) renderSessionStatus() string {
+	if m.session == nil {
+		return "session: —"
+	}
+	name := displaySessionName(m.session)
+	if name == "" {
+		name = "untitled"
+	}
+	return fmt.Sprintf("session: %s · %d msgs", name, len(m.session.Messages))
+}
+
 // renderMenu returns the popup menu lines for the current state, or
 // an empty string if no menu should be shown.
 func (m *Model) renderMenu() string {
@@ -407,6 +679,10 @@ func (m *Model) renderMenu() string {
 		return m.renderCommandMenu()
 	case stateModelPicker:
 		return m.renderModelPicker()
+	case stateSessionPicker:
+		return m.renderSessionPicker()
+	case stateForkPicker:
+		return m.renderForkPicker()
 	}
 	return ""
 }
@@ -547,6 +823,22 @@ func (m *Model) executeCommand(c Command) tea.Cmd {
 		m.executeNewSession()
 		m.state = stateIdle
 		return nil
+	case CommandHelp:
+		m.executeHelp()
+		m.state = stateIdle
+		return nil
+	case CommandSessions:
+		return m.openSessionPicker()
+	case CommandRename:
+		return m.openRenameModal()
+	case CommandFork:
+		return m.openForkPicker()
+	case CommandDelete:
+		cmd := m.executeDelete()
+		m.state = stateIdle
+		return cmd
+	case CommandExport:
+		return m.openExportModal()
 	}
 	m.state = stateIdle
 	return nil
