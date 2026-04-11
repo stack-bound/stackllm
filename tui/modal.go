@@ -131,11 +131,15 @@ func (m *Model) closeModal() {
 // openConfirmModal shows a centered y/n prompt. The action closure is
 // run only if the user confirms, so callers can treat the action as
 // "the thing /delete (or any other destructive command) would do" and
-// trust it won't fire on an accidental keystroke.
-func (m *Model) openConfirmModal(title, prompt string, action func() tea.Cmd) tea.Cmd {
+// trust it won't fire on an accidental keystroke. returnState is the
+// state the TUI lands in when the modal closes — pass stateIdle for
+// top-level commands, or the calling picker's state when the confirm
+// was raised mid-picker so cancelling returns to the picker.
+func (m *Model) openConfirmModal(title, prompt string, returnState modelState, action func() tea.Cmd) tea.Cmd {
 	m.confirmTitle = title
 	m.confirmPrompt = prompt
 	m.confirmAction = action
+	m.confirmReturnState = returnState
 	m.state = stateConfirmModal
 	return nil
 }
@@ -152,11 +156,14 @@ func (m *Model) confirmYes() tea.Cmd {
 }
 
 // closeConfirmModal clears confirm state without running the action.
+// The TUI is returned to confirmReturnState so a confirm raised from a
+// picker lands back in that picker rather than dropping to idle.
 func (m *Model) closeConfirmModal() {
 	m.confirmTitle = ""
 	m.confirmPrompt = ""
 	m.confirmAction = nil
-	m.state = stateIdle
+	m.state = m.confirmReturnState
+	m.confirmReturnState = stateIdle
 }
 
 // renderConfirmModal draws the centered y/n confirmation box. The

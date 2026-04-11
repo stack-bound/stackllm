@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/stack-bound/stackllm/conversation"
 	"github.com/stack-bound/stackllm/session"
 )
@@ -187,6 +189,141 @@ func TestDisplaySessionName(t *testing.T) {
 	}
 	if got := displaySessionName(nil); got != "" {
 		t.Errorf("want empty, got %q", got)
+	}
+}
+
+// seedSessionPicker puts the model into stateSessionPicker with two
+// sessions: the currently-loaded one and a second "other" row. The
+// cursor is parked on the "other" row so 'd' targets that entry. Both
+// sessions are written to the store so a successful confirm-then-delete
+// can observe the store change.
+func seedSessionPicker(t *testing.T, store *fullFakeStore) (*Model, *session.Session) {
+	t.Helper()
+	m := testModel(t, store)
+	m.session.Name = "current"
+	if err := store.Save(nil, m.session); err != nil {
+		t.Fatalf("save current: %v", err)
+	}
+	other := &session.Session{ID: "other-id", Name: "target row"}
+	if err := store.Save(nil, other); err != nil {
+		t.Fatalf("save other: %v", err)
+	}
+	m.state = stateSessionPicker
+	m.sessions = []*session.Session{m.session, other}
+	m.sessionCursor = 1
+	return m, other
+}
+
+func TestSessionPicker_PressDOpensConfirmModal(t *testing.T) {
+	t.Parallel()
+	store := newFullFakeStore()
+	m, target := seedSessionPicker(t, store)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(*Model)
+
+	if m.state != stateConfirmModal {
+		t.Fatalf("expected stateConfirmModal, got %v", m.state)
+	}
+	if !strings.Contains(m.confirmTitle, "Delete") {
+		t.Errorf("expected 'Delete' in title, got %q", m.confirmTitle)
+	}
+	if !strings.Contains(m.confirmPrompt, target.Name) {
+		t.Errorf("expected target session name %q in prompt, got %q", target.Name, m.confirmPrompt)
+	}
+	if m.confirmReturnState != stateSessionPicker {
+		t.Errorf("expected return state stateSessionPicker, got %v", m.confirmReturnState)
+	}
+	// Pre-confirm, the session must still exist in the store.
+	if _, err := store.Load(nil, target.ID); err != nil {
+		t.Errorf("target session should still exist before confirm, got err %v", err)
+	}
+}
+
+func TestSessionPicker_CancelReturnsToPicker(t *testing.T) {
+	t.Parallel()
+	store := newFullFakeStore()
+	m, target := seedSessionPicker(t, store)
+
+	// Open the confirm modal.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(*Model)
+
+	// 'n' should cancel and return to the picker, not drop to idle.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(*Model)
+
+	if m.state != stateSessionPicker {
+		t.Errorf("expected stateSessionPicker after cancel, got %v", m.state)
+	}
+	if _, err := store.Load(nil, target.ID); err != nil {
+		t.Errorf("target session should still exist after cancel, got err %v", err)
+	}
+	if len(m.sessions) != 2 {
+		t.Errorf("expected picker to still show both sessions after cancel, got %d", len(m.sessions))
+	}
+}
+
+func TestSessionPicker_EscCancelReturnsToPicker(t *testing.T) {
+	t.Parallel()
+	store := newFullFakeStore()
+	m, target := seedSessionPicker(t, store)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(*Model)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(*Model)
+
+	if m.state != stateSessionPicker {
+		t.Errorf("expected stateSessionPicker after Esc, got %v", m.state)
+	}
+	if _, err := store.Load(nil, target.ID); err != nil {
+		t.Errorf("target session should still exist after Esc, got err %v", err)
+	}
+}
+
+func TestSessionPicker_ConfirmDeletesTargetAndStaysInPicker(t *testing.T) {
+	t.Parallel()
+	store := newFullFakeStore()
+	m, target := seedSessionPicker(t, store)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = updated.(*Model)
+
+	if m.confirmAction == nil {
+		t.Fatal("expected confirmAction to be set after opening confirm modal")
+	}
+
+	// Invoke the stored action directly so we can synchronously drain
+	// the resulting delete Cmd, then dispatch its message through
+	// Update exactly as the tea runtime would.
+	actionCmd := m.confirmAction()
+	if actionCmd == nil {
+		t.Fatal("expected confirm action to return a tea.Cmd for the delete")
+	}
+	msg := actionCmd()
+	if _, ok := msg.(sessionDeletedMsg); !ok {
+		t.Fatalf("expected sessionDeletedMsg, got %T", msg)
+	}
+	// Close the confirm modal now — mirrors what confirmYes() would
+	// do after dispatching the action.
+	m.closeConfirmModal()
+	if m.state != stateSessionPicker {
+		t.Errorf("expected to return to stateSessionPicker after confirm close, got %v", m.state)
+	}
+
+	updated, _ = m.Update(msg)
+	m = updated.(*Model)
+
+	if _, err := store.Load(nil, target.ID); err == nil {
+		t.Error("expected target session to be deleted from store after confirm")
+	}
+	if len(m.sessions) != 1 {
+		t.Fatalf("expected 1 session remaining in picker, got %d", len(m.sessions))
+	}
+	if m.sessions[0].ID != m.session.ID {
+		t.Errorf("expected only the current session remaining, got %q", m.sessions[0].ID)
 	}
 }
 

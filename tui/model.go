@@ -132,9 +132,13 @@ type Model struct {
 	// Confirm modal state — a y/n prompt with a deferred action that
 	// runs when the user confirms. Used by /delete so a stray Enter
 	// can't silently throw away the current session.
-	confirmTitle  string
-	confirmPrompt string
-	confirmAction func() tea.Cmd
+	// confirmReturnState is the state the TUI restores on close so a
+	// confirm opened from the session picker lands back in the picker
+	// instead of dropping the user out to idle.
+	confirmTitle       string
+	confirmPrompt      string
+	confirmAction      func() tea.Cmd
+	confirmReturnState modelState
 
 	// Cached store capabilities, assigned once in New() so command
 	// handlers don't re-type-assert on every keypress.
@@ -327,18 +331,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
-		case tea.KeyCtrlV:
-			// Intercept Ctrl+V so we can probe the system clipboard
-			// for image bytes. Terminals only deliver UTF-8 text via
-			// bracketed paste, so we have to read the clipboard
-			// ourselves via platform shell-outs. The read is async
-			// (clipboard tools can take hundreds of milliseconds) and
-			// a clipboardImageMsg is delivered back to Update with the
-			// result or errNoImage.
-			if m.state == stateIdle || m.state == stateCommandMenu {
-				skipTextarea = true
-				cmds = append(cmds, m.readClipboardImageCmd())
-			}
 			if m.state == stateSessionPicker {
 				if m.sessionCursor < len(m.sessions)-1 {
 					m.sessionCursor++
@@ -351,11 +343,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
+		case tea.KeyCtrlV:
+			// Intercept Ctrl+V so we can probe the system clipboard
+			// for image bytes. Terminals only deliver UTF-8 text via
+			// bracketed paste, so we have to read the clipboard
+			// ourselves via platform shell-outs. The read is async
+			// (clipboard tools can take hundreds of milliseconds) and
+			// a clipboardImageMsg is delivered back to Update with the
+			// result or errNoImage.
+			if m.state == stateIdle || m.state == stateCommandMenu {
+				skipTextarea = true
+				cmds = append(cmds, m.readClipboardImageCmd())
+			}
 		case tea.KeyRunes:
 			if m.state == stateSessionPicker && len(msg.Runes) == 1 && msg.Runes[0] == 'd' {
 				if len(m.sessions) > 0 {
 					target := m.sessions[m.sessionCursor]
-					cmds = append(cmds, m.deleteSession(target.ID))
+					name := displaySessionName(target)
+					targetID := target.ID
+					cmds = append(cmds, m.openConfirmModal(
+						"Delete session",
+						fmt.Sprintf("Delete %q? This cannot be undone.", name),
+						stateSessionPicker,
+						func() tea.Cmd { return m.deleteSession(targetID) },
+					))
 				}
 				skipTextarea = true
 			}
@@ -920,6 +931,7 @@ func (m *Model) executeCommand(c Command) tea.Cmd {
 		return m.openConfirmModal(
 			"Delete session",
 			fmt.Sprintf("Delete %q? This cannot be undone.", name),
+			stateIdle,
 			func() tea.Cmd { return m.executeDelete() },
 		)
 	case CommandExport:
