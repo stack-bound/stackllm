@@ -108,6 +108,16 @@ type Model struct {
 	modelRecentCount int
 	modelLister      ModelLister
 
+	// Image paste state. pendingImages is keyed by the monotonic
+	// nextImageIdx, which is never rewound within a single Model's
+	// lifetime so that a stale `[Image #1]` placeholder in the
+	// scrollback can't collide with a freshly-pasted `[Image #1]`.
+	// The map is cleared on send (and on /new, which also resets the
+	// counter since a brand-new session starts numbering at 1).
+	pendingImages   map[int]pendingImage
+	nextImageIdx    int
+	clipboardReader ClipboardReader
+
 	// Styles
 	userStyle      lipgloss.Style
 	assistantStyle lipgloss.Style
@@ -153,6 +163,8 @@ func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 		viewport:        vp,
 		spinner:         sp,
 		state:           stateIdle,
+		pendingImages:   map[int]pendingImage{},
+		clipboardReader: defaultClipboardReader,
 		userStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true),
 		assistantStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
 		toolStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true),
@@ -231,6 +243,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
+		case tea.KeyCtrlV:
+			// Intercept Ctrl+V so we can probe the system clipboard
+			// for image bytes. Terminals only deliver UTF-8 text via
+			// bracketed paste, so we have to read the clipboard
+			// ourselves via platform shell-outs. The read is async
+			// (clipboard tools can take hundreds of milliseconds) and
+			// a clipboardImageMsg is delivered back to Update with the
+			// result or errNoImage.
+			if m.state == stateIdle || m.state == stateCommandMenu {
+				skipTextarea = true
+				cmds = append(cmds, m.readClipboardImageCmd())
+			}
 		case tea.KeyEnter:
 			if msg.Alt {
 				break // pass Alt+Enter to textarea for newline insertion
@@ -259,11 +283,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 				m.textarea.Reset()
-				m.appendOutput(m.userStyle.Render("You: ") + input + "\n\n")
+				blocks := parseInputBlocks(input, m.pendingImages)
+				m.appendOutput(m.userStyle.Render("You: ") + renderUserInputPreview(blocks) + "\n\n")
 				m.session.AppendMessage(conversation.Message{
 					Role:   conversation.RoleUser,
-					Blocks: []conversation.Block{{Type: conversation.BlockText, Text: input}},
+					Blocks: blocks,
 				})
+				// Clear pending images on send. nextImageIdx is NOT
+				// reset — the counter is monotonic for the Model's
+				// lifetime so stale placeholders in the scrollback
+				// never collide with a fresh paste.
+				m.pendingImages = map[int]pendingImage{}
 				m.state = stateRunning
 				cmds = append(cmds, m.runAgent())
 			}
@@ -291,6 +321,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+
+	case clipboardImageMsg:
+		// If the clipboard probe failed or had no image, fall back to
+		// the default text-paste path so Ctrl+V keeps working
+		// identically to before when the clipboard holds text. Any
+		// other error is also treated as fallback — an unusable
+		// clipboard probe should never block the user from pasting
+		// text.
+		if msg.err != nil || len(msg.data) == 0 {
+			cmds = append(cmds, textarea.Paste)
+			break
+		}
+		m.nextImageIdx++
+		idx := m.nextImageIdx
+		m.pendingImages[idx] = pendingImage{mime: msg.mime, data: msg.data}
+		m.textarea.InsertString(fmt.Sprintf("[Image #%d]", idx))
+		m.resizeTextarea()
 
 	case agentEventMsg:
 		cmds = append(cmds, m.handleAgentEvent(msg.event))
@@ -553,9 +600,14 @@ func (m *Model) executeCommand(c Command) tea.Cmd {
 }
 
 // executeNewSession discards the current session and starts fresh.
+// A fresh session resets the image placeholder counter back to 1
+// because the old scrollback is cleared at the same time, so there's
+// nothing to collide with.
 func (m *Model) executeNewSession() {
 	m.session = session.New()
 	m.output.Reset()
+	m.pendingImages = map[int]pendingImage{}
+	m.nextImageIdx = 0
 	m.refreshViewport()
 	m.appendOutput(m.toolStyle.Render("New session started.") + "\n\n")
 }
@@ -726,4 +778,30 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// renderUserInputPreview produces the echo line drawn into the
+// scrollback when the user sends a message. It walks the same blocks
+// that were just appended to the session so image blocks render as
+// `[image: mime, N bytes]` alongside the surrounding text.
+func renderUserInputPreview(blocks []conversation.Block) string {
+	var b strings.Builder
+	for i, blk := range blocks {
+		switch blk.Type {
+		case conversation.BlockText:
+			if blk.Text == "" {
+				continue
+			}
+			if i > 0 && b.Len() > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(blk.Text)
+		case conversation.BlockImage:
+			if b.Len() > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(renderImagePlaceholder(blk))
+		}
+	}
+	return b.String()
 }
