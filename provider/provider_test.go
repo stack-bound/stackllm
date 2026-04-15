@@ -293,6 +293,55 @@ data: [DONE]
 	}
 }
 
+// TestOpenAIProvider_StreamReasoningTextFieldName asserts that reasoning
+// deltas delivered under `reasoning_text` (the field name used by
+// GitHub Copilot's proxy for Gemini 3.x models) map to BlockThinking.
+// Historically the parser only recognised `reasoning_content` /
+// `reasoning`, so Copilot-proxied Gemini thinking was dropped silently.
+func TestOpenAIProvider_StreamReasoningTextFieldName(t *testing.T) {
+	t.Parallel()
+
+	sseData := `data: {"choices":[{"delta":{"reasoning_text":"let me think"}}]}
+
+data: {"choices":[{"delta":{"content":"the answer"}}]}
+
+data: [DONE]
+
+`
+	p := New(Config{
+		BaseURL:     "http://provider.test/v1",
+		TokenSource: auth.NewStatic("key"),
+		Model:       "gemini-3.1-pro-preview",
+		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
+		MaxRetries:  1,
+	})
+
+	events, err := p.Complete(context.Background(), Request{
+		Messages: []conversation.Message{userText("hi")},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+
+	var blocks []conversation.Block
+	for ev := range events {
+		if ev.Type == EventTypeBlockEnd && ev.Block != nil {
+			blocks = append(blocks, *ev.Block)
+		}
+	}
+
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2; blocks=%+v", len(blocks), blocks)
+	}
+	if blocks[0].Type != conversation.BlockThinking || blocks[0].Text != "let me think" {
+		t.Errorf("blocks[0] = {%s %q}, want thinking/%q", blocks[0].Type, blocks[0].Text, "let me think")
+	}
+	if blocks[1].Type != conversation.BlockText || blocks[1].Text != "the answer" {
+		t.Errorf("blocks[1] = {%s %q}, want text/%q", blocks[1].Type, blocks[1].Text, "the answer")
+	}
+}
+
 func TestOpenAIProvider_BuildRequestBody_DropsThinkingAndFlattens(t *testing.T) {
 	t.Parallel()
 

@@ -71,7 +71,7 @@ func renderBlocksForUser(b *strings.Builder, msg conversation.Message) {
 // renderBlocksForAssistant walks the full interleaved sequence an
 // assistant turn can carry: thinking, text, tool_use, redacted_thinking.
 func renderBlocksForAssistant(b *strings.Builder, msg conversation.Message) {
-	thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Faint(true)
+	thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "250"}).Italic(true)
 	toolStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 
 	first := true

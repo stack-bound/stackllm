@@ -616,6 +616,7 @@ func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 					Content          string `json:"content"`
 					ReasoningContent string `json:"reasoning_content"`
 					Reasoning        string `json:"reasoning"`
+					ReasoningText    string `json:"reasoning_text"`
 					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
@@ -656,10 +657,16 @@ func (p *OpenAIProvider) readChatSSE(body io.Reader, events chan<- Event) {
 
 		delta := chunk.Choices[0].Delta
 
-		// Some backends expose reasoning under different field names.
+		// Some backends expose reasoning under different field names:
+		// - OpenAI / Gemini direct:         delta.reasoning_content
+		// - Some OpenAI-compat gateways:    delta.reasoning
+		// - GitHub Copilot (Gemini proxy):  delta.reasoning_text
 		reasoning := delta.ReasoningContent
 		if reasoning == "" {
 			reasoning = delta.Reasoning
+		}
+		if reasoning == "" {
+			reasoning = delta.ReasoningText
 		}
 
 		if reasoning != "" {

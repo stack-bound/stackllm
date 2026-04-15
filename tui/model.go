@@ -1051,7 +1051,7 @@ func (m *Model) runAgent() tea.Cmd {
 			return agentDoneMsg{}
 		}
 
-		thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Faint(true)
+		thinkingStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "250"}).Italic(true)
 		currentBlock := conversation.BlockText
 
 		for ev := range events {

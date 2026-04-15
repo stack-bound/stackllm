@@ -1,0 +1,16 @@
+deployment:
+  - ""
+added:
+  - ""
+changed:
+  - "Changed colour of the thinking blocks and made italic."
+deprecated:
+  - ""
+removed:
+  - ""
+fixed:
+  - "Show Gemini thinking blocks as they come under a differnt name to other models"
+security:
+  - ""
+yanked:
+  - ""
