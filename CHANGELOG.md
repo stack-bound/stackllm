@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.3.0] - 2026-04-15
+### Changed
+- Changed colour of the thinking blocks and made italic.
+### Fixed
+- Show Gemini thinking blocks as they come under a differnt name to other models
+
 ## [0.2.0] - 2026-04-11
 ### Added
 - TUI `/help` command listing all available slash commands with descriptions
