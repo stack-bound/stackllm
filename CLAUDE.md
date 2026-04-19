@@ -262,6 +262,41 @@ Routes:
 
 SSE events: `block_start`, `block_delta`, `block_end`, `done`, `error`. Each `block_end` payload carries the fully accumulated block under a `block` key; each `block_delta` carries `block_type` + `delta`. Binary payloads (image / redacted data) are emitted as byte lengths, not raw bytes, to keep SSE lines small.
 
+#### ManagedHandler — browser-only embedding
+
+`web.NewManagedHandler(mgr *profile.Manager, store session.SessionStore, opts ...ManagedOption)` wraps `profile.Manager` so an HTTP-only client (e.g. a SPA) can drive the entire stackllm lifecycle without a TUI. Agent-level knobs (tools, max steps, hooks) are passed via `web.WithAgentOptions(agent.Option...)`; OpenAI OAuth is enabled via `web.WithOpenAIOAuthClientID(id)`.
+
+```go
+api := web.NewManagedHandler(profile.New(), session.NewInMemoryStore(),
+    web.WithAgentOptions(agent.WithTools(registry), agent.WithMaxSteps(10)),
+    web.WithOpenAIOAuthClientID(os.Getenv("OPENAI_OAUTH_CLIENT_ID")),
+)
+http.ListenAndServe(":8080", api)
+```
+
+Routes (mount under a prefix of your choosing):
+
+- `GET /providers` — list all providers with `{name, authenticated, is_default}`
+- `POST /providers/openai/login` / `POST /providers/gemini/login` — body `{"key":"..."}`
+- `POST /providers/openai/oauth/login` / `GET /providers/openai/oauth/status` — OpenAI OAuth device-code flow. 404 unless the handler was built with `WithOpenAIOAuthClientID(...)`. On success the access token is mirrored into the OpenAI API-key slot so the existing `LoadProvider` path works unchanged. Refresh is not hooked up — users re-auth via the web UI when the token expires. `/providers` advertises `openai_oauth_ready: bool` so the UI can hide the button when unconfigured.
+- `POST /providers/ollama/login` — body `{"base_url":"..."}` (optional)
+- `POST /providers/copilot/login` — starts GitHub device flow; blocks until the device code is issued, then returns `{status, user_code, verify_url}`. Background goroutine polls until the user completes authorisation.
+- `GET /providers/copilot/status` — poll endpoint for the device flow. Returns `pending` / `authenticated` / `error` / `not_started`.
+- `POST /providers/{name}/logout` — clears stored credentials.
+- `GET /models` — merged list across authenticated providers.
+- `GET /models/{provider}` — models for one provider.
+- `GET /default` / `POST /default` — read or set the default model. The POST body is `{"provider","model","endpoint"}`; endpoint is optional and defaults to `/chat/completions`. Set operations also push the choice onto `profile.Manager`'s recent-models list.
+- `POST /chat` — same SSE contract as `Handler`, but builds a fresh provider per request from the persisted default. Returns 409 if no default is set.
+- `GET /sessions/{id}` / `DELETE /sessions/{id}` — session management.
+
+The supporting `profile.Manager` API for web flows lives in `profile/web.go`:
+
+- `SaveAPIKey(ctx, providerName, key)` — direct API-key save (skips the Callbacks.OnPromptKey interactive prompt)
+- `SaveOllamaURL(ctx, baseURL)` — direct Ollama base URL save
+- `Default(ctx) (ModelInfo, bool, error)` — read current default
+- `BeginCopilotLogin(ctx) (*DeviceFlow, error)` — starts the device flow; blocks until OnDeviceCode fires so the caller gets the code synchronously. Background goroutine continues polling; inspect via `DeviceFlow.State()`, `UserCode()`, `VerifyURL()`, `Err()`. `Cancel()` aborts the poll loop.
+- `BeginOpenAIDeviceLogin(ctx, clientID)` — same pattern for OpenAI's OAuth device-code flow. Requires a caller-supplied OAuth client ID (OpenAI does not publish a public one). On success the access token is mirrored into the OpenAI API-key slot.
+
 ## Conventions
 
 - Errors: `fmt.Errorf("package: action: %w", err)`

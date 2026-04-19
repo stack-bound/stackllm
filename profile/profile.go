@@ -55,10 +55,13 @@ type Callbacks struct {
 }
 
 // ProviderStatus describes the authentication state of a single provider.
+//
+// JSON tags are lowercase-snake so web adapters can emit this type
+// directly to browsers without a translation layer.
 type ProviderStatus struct {
-	Name          string
-	Authenticated bool
-	IsDefault     bool
+	Name          string `json:"name"`
+	Authenticated bool   `json:"authenticated"`
+	IsDefault     bool   `json:"is_default"`
 }
 
 // ModelInfo identifies a model scoped to its provider.
@@ -220,10 +223,22 @@ func (m *Manager) loginOllama(ctx context.Context) error {
 }
 
 // Logout clears stored credentials for the named provider.
+//
+// For OpenAI this clears both the API-key slot and the OAuth device
+// flow token record, so a user who logged in via BeginOpenAIDeviceLogin
+// (which writes both) is fully logged out after a single call.
 func (m *Manager) Logout(ctx context.Context, providerName string) error {
 	switch providerName {
 	case ProviderOpenAI:
-		return m.authStore.Delete(ctx, keyOpenAI)
+		if err := m.authStore.Delete(ctx, keyOpenAI); err != nil {
+			return err
+		}
+		// The OAuth device-flow source owns its own store key; ask
+		// the source to clear it so we don't couple profile to the
+		// internal auth constant. Delete on a missing key is a
+		// no-op for the stock stores, so this is safe even when the
+		// user never ran an OAuth login.
+		return auth.NewOpenAIDeviceSource(auth.OpenAIDeviceConfig{Store: m.authStore}).Logout(ctx)
 	case ProviderGemini:
 		return m.authStore.Delete(ctx, keyGemini)
 	case ProviderCopilot:
@@ -283,6 +298,12 @@ func (m *Manager) isAuthenticated(ctx context.Context, name string, cfg *config.
 // ListModels returns available chat model IDs for a single provider.
 // The provider must be authenticated. Embedding-only models are
 // filtered out.
+//
+// Prefer ListProviderModels when the caller needs the Endpoint
+// metadata — this flattened form drops it and models that are only
+// reachable via /responses (e.g. Copilot gpt-5.4-mini) will silently
+// fall back to /chat/completions if the endpoint is not carried
+// forward to SetDefaultModel.
 func (m *Manager) ListModels(ctx context.Context, providerName string) ([]string, error) {
 	infos, err := m.listModelsForProvider(ctx, providerName)
 	if err != nil {
@@ -293,6 +314,13 @@ func (m *Manager) ListModels(ctx context.Context, providerName string) ([]string
 		out[i] = info.Model
 	}
 	return out, nil
+}
+
+// ListProviderModels returns ModelInfo entries for a single
+// authenticated provider, preserving Endpoint metadata. The provider
+// must be authenticated. Embedding-only models are filtered out.
+func (m *Manager) ListProviderModels(ctx context.Context, providerName string) ([]ModelInfo, error) {
+	return m.listModelsForProvider(ctx, providerName)
 }
 
 // listModelsForProvider returns ModelInfo entries for a single provider's

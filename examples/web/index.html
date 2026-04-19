@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>stackllm web example</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 880px; margin: 2rem auto; padding: 0 1rem; color: #1c1c1c; }
+  h1 { margin-bottom: .2rem; }
+  h2 { border-bottom: 1px solid #ccc; padding-bottom: .2rem; margin-top: 2rem; }
+  section { margin-bottom: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { padding: .4rem .6rem; text-align: left; border-bottom: 1px solid #eee; }
+  th { background: #f4f4f4; }
+  button { padding: .3rem .7rem; cursor: pointer; }
+  input[type=text], input[type=password], select { padding: .3rem .4rem; font-size: 1rem; min-width: 14rem; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: .8rem; }
+  .ok { background: #d3f0d3; color: #155724; }
+  .bad { background: #f4d3d3; color: #842029; }
+  .muted { color: #666; font-size: .9rem; }
+  #chatLog { white-space: pre-wrap; border: 1px solid #ccc; padding: 1rem; min-height: 10rem; background: #fafafa; }
+  #chatLog .thinking { color: #888; font-style: italic; }
+  #chatLog .user { color: #0a4; }
+  #chatLog .assistant { color: #06c; }
+  .flow-code { font-family: monospace; font-size: 1.6rem; letter-spacing: .15rem; padding: .5rem 1rem; background: #fffbcc; border: 1px solid #e6d27a; display: inline-block; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .3rem 0; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<h1>stackllm — web UI</h1>
+<p class="muted">Authenticate a provider, pick a model, chat. No terminal required.</p>
+
+<section id="providers">
+  <h2>1. Providers</h2>
+  <table>
+    <thead><tr><th>Provider</th><th>Status</th><th>Actions</th></tr></thead>
+    <tbody id="providerTable"></tbody>
+  </table>
+</section>
+
+<section id="loginForms">
+  <h2>2. Login</h2>
+  <div class="row">
+    <label for="providerPick">Provider:</label>
+    <select id="providerPick">
+      <option value="openai">openai (API key)</option>
+      <option value="gemini">gemini (API key)</option>
+      <option value="ollama">ollama (base URL)</option>
+      <option value="copilot">copilot (device flow)</option>
+    </select>
+  </div>
+
+  <div id="apiKeyForm">
+    <div class="row">
+      <input type="password" id="apiKey" placeholder="sk-...">
+      <button id="btnApiKey">Save key</button>
+    </div>
+    <div class="row" id="openaiOAuthRow" hidden>
+      <span class="muted">— or —</span>
+      <button id="btnOpenAIOAuth">Log in with OpenAI</button>
+    </div>
+  </div>
+
+  <div id="ollamaForm" class="row" hidden>
+    <input type="text" id="ollamaURL" placeholder="http://localhost:11434">
+    <button id="btnOllama">Save URL</button>
+  </div>
+
+  <div id="copilotForm" class="row" hidden>
+    <button id="btnCopilotStart">Start GitHub device flow</button>
+  </div>
+
+  <div id="deviceProgress" hidden>
+    <p class="muted" id="deviceProgressHelp"></p>
+    <div class="row">
+      <code class="flow-code" id="flowCode"></code>
+      <a id="flowURL" target="_blank" rel="noopener"></a>
+    </div>
+    <p class="muted" id="flowState"></p>
+  </div>
+
+  <p id="loginMsg" class="muted"></p>
+</section>
+
+<section id="modelSection">
+  <h2>3. Choose a model</h2>
+  <div class="row">
+    <button id="btnRefreshModels">Refresh model list</button>
+    <select id="modelSelect"><option>(no models loaded)</option></select>
+    <button id="btnSetDefault">Set as default</button>
+  </div>
+  <p id="defaultMsg" class="muted"></p>
+</section>
+
+<section id="chatSection">
+  <h2>4. Chat</h2>
+  <div id="chatLog"></div>
+  <div class="row" style="margin-top: .5rem;">
+    <input type="text" id="chatInput" placeholder="Type a message…" style="flex:1">
+    <button id="btnSend">Send</button>
+  </div>
+  <p class="muted">Session ID: <code id="sessionID">(new)</code></p>
+</section>
+
+<script>
+const api = (path, init) => fetch("/api" + path, init).then(async r => {
+  const text = await r.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  return { ok: r.ok, status: r.status, body };
+});
+
+let openaiOAuthReady = false;
+
+async function refreshProviders() {
+  const res = await api("/providers");
+  const tbody = document.getElementById("providerTable");
+  tbody.innerHTML = "";
+  if (!res.ok) {
+    tbody.innerHTML = `<tr><td colspan="3">Error: ${res.body?.error || res.status}</td></tr>`;
+    return;
+  }
+  openaiOAuthReady = !!res.body.openai_oauth_ready;
+  for (const p of res.body.providers) {
+    const tr = document.createElement("tr");
+    const authClass = p.authenticated ? "ok" : "bad";
+    const authText = p.authenticated ? "authenticated" : "not authenticated";
+    const defaultMark = p.is_default ? " (default)" : "";
+    tr.innerHTML = `
+      <td>${p.name}</td>
+      <td><span class="pill ${authClass}">${authText}</span>${defaultMark}</td>
+      <td>${p.authenticated ? `<button data-logout="${p.name}">Log out</button>` : ""}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("button[data-logout]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const name = btn.getAttribute("data-logout");
+      await api(`/providers/${name}/logout`, { method: "POST" });
+      await refreshProviders();
+    });
+  });
+  // The OAuth button is OpenAI-only and only surfaces when the
+  // server advertises that a client ID has been configured.
+  const pick = document.getElementById("providerPick").value;
+  document.getElementById("openaiOAuthRow").hidden = !(pick === "openai" && openaiOAuthReady);
+}
+
+function showForm() {
+  const pick = document.getElementById("providerPick").value;
+  document.getElementById("apiKeyForm").hidden = !(pick === "openai" || pick === "gemini");
+  document.getElementById("openaiOAuthRow").hidden = !(pick === "openai" && openaiOAuthReady);
+  document.getElementById("ollamaForm").hidden = pick !== "ollama";
+  document.getElementById("copilotForm").hidden = pick !== "copilot";
+  document.getElementById("deviceProgress").hidden = true;
+}
+
+async function loginAPIKey() {
+  const provider = document.getElementById("providerPick").value;
+  const key = document.getElementById("apiKey").value.trim();
+  const res = await api(`/providers/${provider}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  const msg = document.getElementById("loginMsg");
+  msg.textContent = res.ok ? `Logged in to ${provider}.` : `Error: ${res.body?.error || res.status}`;
+  await refreshProviders();
+}
+
+async function loginOllama() {
+  const base = document.getElementById("ollamaURL").value.trim();
+  const res = await api("/providers/ollama/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url: base }),
+  });
+  const msg = document.getElementById("loginMsg");
+  msg.textContent = res.ok ? "Ollama configured." : `Error: ${res.body?.error || res.status}`;
+  await refreshProviders();
+}
+
+// deviceFlow drives any of the provider device-login endpoints the
+// server exposes. Copilot and OpenAI OAuth share the same wire
+// shape, so the UI can handle them with one helper.
+let devicePollTimer = null;
+
+async function startDeviceFlow(label, startPath, statusPath) {
+  if (devicePollTimer) clearTimeout(devicePollTimer);
+
+  const progress = document.getElementById("deviceProgress");
+  progress.hidden = false;
+  document.getElementById("deviceProgressHelp").textContent =
+    `${label}: open the URL below and enter the one-time code. The server polls until you complete authorisation.`;
+  document.getElementById("flowCode").textContent = "(requesting…)";
+  document.getElementById("flowURL").textContent = "";
+  document.getElementById("flowState").textContent = "";
+
+  const res = await api(startPath, { method: "POST" });
+  if (!res.ok) {
+    document.getElementById("flowState").textContent = `Error: ${res.body?.error || res.status}`;
+    return;
+  }
+  renderFlow(res.body);
+  pollDeviceFlow(statusPath);
+}
+
+function renderFlow(payload) {
+  document.getElementById("flowCode").textContent = payload.user_code || "(no code)";
+  const link = document.getElementById("flowURL");
+  if (payload.verify_url) {
+    link.textContent = payload.verify_url;
+    link.href = payload.verify_url;
+  } else {
+    link.textContent = "";
+    link.href = "#";
+  }
+  document.getElementById("flowState").textContent = "status: " + (payload.status || "?");
+}
+
+async function pollDeviceFlow(statusPath) {
+  if (devicePollTimer) clearTimeout(devicePollTimer);
+  const res = await api(statusPath);
+  if (res.ok) {
+    renderFlow(res.body);
+    if (res.body.status === "authenticated") {
+      document.getElementById("flowState").textContent = "Authenticated.";
+      await refreshProviders();
+      return;
+    }
+    if (res.body.status === "error") {
+      document.getElementById("flowState").textContent = "Error: " + (res.body.error || "unknown");
+      return;
+    }
+  }
+  devicePollTimer = setTimeout(() => pollDeviceFlow(statusPath), 2000);
+}
+
+function copilotStart() {
+  return startDeviceFlow("GitHub Copilot", "/providers/copilot/login", "/providers/copilot/status");
+}
+
+function openaiOAuthStart() {
+  return startDeviceFlow("OpenAI", "/providers/openai/oauth/login", "/providers/openai/oauth/status");
+}
+
+async function refreshModels() {
+  const res = await api("/models");
+  const sel = document.getElementById("modelSelect");
+  sel.innerHTML = "";
+  if (!res.ok || !res.body.models || res.body.models.length === 0) {
+    const opt = document.createElement("option");
+    opt.textContent = "(no models)";
+    sel.appendChild(opt);
+    return;
+  }
+  for (const m of res.body.models) {
+    const opt = document.createElement("option");
+    opt.value = JSON.stringify({ provider: m.provider, model: m.model, endpoint: m.endpoint || "" });
+    opt.textContent = m.id + (m.context_window ? ` (${m.context_window} ctx)` : "");
+    sel.appendChild(opt);
+  }
+  const defaultRes = await api("/default");
+  if (defaultRes.ok && defaultRes.body.set) {
+    const wanted = `${defaultRes.body.provider}/${defaultRes.body.model}`;
+    for (const opt of sel.options) {
+      if (opt.textContent.startsWith(wanted)) {
+        opt.selected = true;
+        break;
+      }
+    }
+    document.getElementById("defaultMsg").textContent = `Default: ${wanted}` + (defaultRes.body.endpoint ? ` (via ${defaultRes.body.endpoint})` : "");
+  } else {
+    document.getElementById("defaultMsg").textContent = "No default yet.";
+  }
+}
+
+async function setDefault() {
+  const sel = document.getElementById("modelSelect");
+  if (!sel.value) return;
+  const info = JSON.parse(sel.value);
+  const res = await api("/default", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(info),
+  });
+  const msg = document.getElementById("defaultMsg");
+  msg.textContent = res.ok ? `Default set: ${info.provider}/${info.model}` : `Error: ${res.body?.error || res.status}`;
+  await refreshProviders();
+}
+
+let currentSessionID = "";
+
+async function sendChat() {
+  const input = document.getElementById("chatInput");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+
+  const log = document.getElementById("chatLog");
+  const userLine = document.createElement("div");
+  userLine.className = "user";
+  userLine.textContent = "› " + text;
+  log.appendChild(userLine);
+
+  const assistantLine = document.createElement("div");
+  assistantLine.className = "assistant";
+  assistantLine.textContent = "‹ ";
+  log.appendChild(assistantLine);
+
+  const thinkingLine = document.createElement("div");
+  thinkingLine.className = "thinking";
+  log.appendChild(thinkingLine);
+
+  const body = {
+    session_id: currentSessionID,
+    message: { role: "user", blocks: [{ type: "text", text }] },
+  };
+
+  const resp = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok || !resp.body) {
+    assistantLine.textContent += `[error ${resp.status}]`;
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const records = buf.split("\n\n");
+    buf = records.pop();
+    for (const r of records) {
+      const lines = r.split("\n");
+      let evt = "", data = "";
+      for (const line of lines) {
+        if (line.startsWith("event: ")) evt = line.slice(7);
+        else if (line.startsWith("data: ")) data = line.slice(6);
+      }
+      if (!evt) continue;
+      let payload = {};
+      try { payload = data ? JSON.parse(data) : {}; } catch {}
+
+      switch (evt) {
+        case "block_delta":
+          if (payload.block_type === "text") {
+            assistantLine.textContent += payload.delta || "";
+          } else if (payload.block_type === "thinking") {
+            thinkingLine.textContent += payload.delta || "";
+          }
+          break;
+        case "done":
+          if (payload.session_id) {
+            currentSessionID = payload.session_id;
+            document.getElementById("sessionID").textContent = payload.session_id;
+          }
+          break;
+        case "error":
+          assistantLine.textContent += "\n[error: " + (payload.message || "unknown") + "]";
+          break;
+      }
+    }
+  }
+}
+
+document.getElementById("providerPick").addEventListener("change", showForm);
+document.getElementById("btnApiKey").addEventListener("click", loginAPIKey);
+document.getElementById("btnOllama").addEventListener("click", loginOllama);
+document.getElementById("btnCopilotStart").addEventListener("click", copilotStart);
+document.getElementById("btnOpenAIOAuth").addEventListener("click", openaiOAuthStart);
+document.getElementById("btnRefreshModels").addEventListener("click", refreshModels);
+document.getElementById("btnSetDefault").addEventListener("click", setDefault);
+document.getElementById("btnSend").addEventListener("click", sendChat);
+document.getElementById("chatInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") sendChat();
+});
+
+showForm();
+refreshProviders();
+refreshModels();
+</script>
+</body>
+</html>

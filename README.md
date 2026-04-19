@@ -155,6 +155,7 @@ Runnable examples live in `examples/`.
 | `examples/copilot` | Direct Copilot wiring without the manager — shows the two-phase GitHub device flow and caching token source. |
 | `examples/tui` | Full Bubbletea TUI agent. Streams tokens as they arrive, renders tool calls and results inline, supports Ctrl+V image paste (inserts a `[Image #N]` placeholder and attaches a `BlockImage` on send), and supports slash commands: `/models` to switch provider/model at runtime (with recently-used models surfaced first), `/new` to start a fresh session. Uses the persisted default or falls back to `OPENAI_API_KEY`. |
 | `examples/sqlite` | Shared-DB demo for `session.SQLiteStore`: opens a single SQLite file, runs a parent-app migration (`memories` table), hands the same `*sql.DB` to `session.NewSQLiteStore`, saves a conversation, and queries both namespaces to prove coexistence. No network calls — usable as a CI smoke test. |
+| `examples/web` | Browser-only embedding. Serves `web.ManagedHandler` under `/api/*` and a minimal single-page UI at `/` that drives provider login (API keys, Ollama URL, Copilot device flow), model selection, default setting, and streaming chat — all over HTTP with no TUI. |
 
 Run any of them with `go run ./examples/<name>`.
 
