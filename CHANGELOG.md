@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.4.0] - 2026-04-19
+### Added
+- Added endpoint for logging in with all providers
+- Added a web example of how to log in to a provider, choose a model and start a chat
+### Fixed
+- Fixed model communication issues with OpenAI models
+
 ## [0.3.0] - 2026-04-15
 ### Changed
 - Changed colour of the thinking blocks and made italic.
