@@ -1541,3 +1541,174 @@ func TestSQLiteStore_ListReflectsStateUpdates(t *testing.T) {
 		t.Errorf("List state phase = %v, want two", got)
 	}
 }
+
+// ---------------------------------------------------------------------
+// Pagination: SessionPaginator contract.
+// ---------------------------------------------------------------------
+
+// TestSQLiteStore_ListPage exercises the optional pagination capability
+// — ordering, total count, default limit, negative limit, offset past
+// total, parity with List, Total reflecting Delete, and forks counting
+// as independent rows.
+func TestSQLiteStore_ListPage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Compile-time assertion that SQLiteStore satisfies the optional
+	// pagination interface.
+	var _ SessionPaginator = (*SQLiteStore)(nil)
+
+	store := newFileStore(t)
+
+	// Seed 12 sessions in known order. updated_at is overwritten by
+	// Save (which calls time.Now), so we let the natural insert order
+	// drive the ranking.
+	ids := make([]string, 12)
+	for i := 0; i < 12; i++ {
+		s := New()
+		s.Name = fmt.Sprintf("sess-%02d", i)
+		s.AppendMessage(conversation.Message{
+			Role:   conversation.RoleUser,
+			Blocks: []conversation.Block{{Type: conversation.BlockText, Text: s.Name}},
+		})
+		if err := store.Save(ctx, s); err != nil {
+			t.Fatalf("Save %d: %v", i, err)
+		}
+		ids[i] = s.ID
+		// Tiny gap so updated_at strictly increases without
+		// dragging the test out.
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// First page: 5 newest, in updated-desc order. The most recently
+	// saved session (sess-11) must come first.
+	page, err := store.ListPage(ctx, ListOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if page.Total != 12 {
+		t.Errorf("Total = %d, want 12", page.Total)
+	}
+	if len(page.Sessions) != 5 {
+		t.Fatalf("Sessions len = %d, want 5", len(page.Sessions))
+	}
+	wantNames := []string{"sess-11", "sess-10", "sess-09", "sess-08", "sess-07"}
+	for i, want := range wantNames {
+		if page.Sessions[i].Name != want {
+			t.Errorf("Sessions[%d].Name = %q, want %q", i, page.Sessions[i].Name, want)
+		}
+	}
+	// ListPage must not hydrate Messages, same contract as List.
+	if len(page.Sessions[0].Messages) != 0 {
+		t.Errorf("ListPage populated Messages (%d), should be empty", len(page.Sessions[0].Messages))
+	}
+
+	// Second page: next 5.
+	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 5})
+	if err != nil {
+		t.Fatalf("ListPage offset=5: %v", err)
+	}
+	wantNames = []string{"sess-06", "sess-05", "sess-04", "sess-03", "sess-02"}
+	if len(page.Sessions) != 5 {
+		t.Fatalf("page2 len = %d, want 5", len(page.Sessions))
+	}
+	for i, want := range wantNames {
+		if page.Sessions[i].Name != want {
+			t.Errorf("page2[%d].Name = %q, want %q", i, page.Sessions[i].Name, want)
+		}
+	}
+
+	// Last partial page.
+	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 10})
+	if err != nil {
+		t.Fatalf("ListPage offset=10: %v", err)
+	}
+	if len(page.Sessions) != 2 {
+		t.Errorf("last page len = %d, want 2", len(page.Sessions))
+	}
+
+	// Offset past end.
+	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 999})
+	if err != nil {
+		t.Fatalf("ListPage offset=999: %v", err)
+	}
+	if page.Total != 12 || len(page.Sessions) != 0 {
+		t.Errorf("offset past end: Total=%d Sessions=%d", page.Total, len(page.Sessions))
+	}
+
+	// Negative limit returns every row, parity with List by ID set.
+	page, err = store.ListPage(ctx, ListOptions{Limit: -1})
+	if err != nil {
+		t.Fatalf("ListPage Limit=-1: %v", err)
+	}
+	if len(page.Sessions) != 12 {
+		t.Errorf("Limit=-1 len = %d, want 12", len(page.Sessions))
+	}
+	listAll, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !sameIDSet(listAll, page.Sessions) {
+		t.Error("ListPage(Limit=-1) and List returned different ID sets")
+	}
+
+	// Default limit kicks in at Limit=0.
+	bigStore := newFileStore(t)
+	for i := 0; i < DefaultListLimit+5; i++ {
+		s := New()
+		s.AppendMessage(conversation.Message{
+			Role:   conversation.RoleUser,
+			Blocks: []conversation.Block{{Type: conversation.BlockText, Text: fmt.Sprintf("%d", i)}},
+		})
+		if err := bigStore.Save(ctx, s); err != nil {
+			t.Fatalf("seed save %d: %v", i, err)
+		}
+	}
+	page, err = bigStore.ListPage(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("default ListPage: %v", err)
+	}
+	if len(page.Sessions) != DefaultListLimit {
+		t.Errorf("default page len = %d, want %d", len(page.Sessions), DefaultListLimit)
+	}
+	if page.Total != DefaultListLimit+5 {
+		t.Errorf("default Total = %d, want %d", page.Total, DefaultListLimit+5)
+	}
+
+	// Total reflects Delete.
+	if err := store.Delete(ctx, ids[0]); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	page, err = store.ListPage(ctx, ListOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListPage after delete: %v", err)
+	}
+	if page.Total != 11 {
+		t.Errorf("Total after delete = %d, want 11", page.Total)
+	}
+
+	// Fork creates an independent row that ListPage counts.
+	parent := ids[5]
+	parentSess, err := store.Load(ctx, parent)
+	if err != nil {
+		t.Fatalf("Load parent: %v", err)
+	}
+	if len(parentSess.Messages) == 0 {
+		t.Fatal("parent session has no messages to fork at")
+	}
+	forkAt := parentSess.Messages[0].ID
+	forked, err := store.Fork(ctx, parent, forkAt, "forked")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if forked.ID == parent {
+		t.Fatal("Fork returned the parent ID")
+	}
+	page, err = store.ListPage(ctx, ListOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListPage after fork: %v", err)
+	}
+	if page.Total != 12 {
+		t.Errorf("Total after fork = %d, want 12 (11 originals + 1 fork)", page.Total)
+	}
+}

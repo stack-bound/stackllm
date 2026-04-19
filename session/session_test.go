@@ -2,7 +2,10 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"testing"
+	"time"
 
 	"github.com/stack-bound/stackllm/conversation"
 )
@@ -153,6 +156,129 @@ func TestInMemoryStore_Update(t *testing.T) {
 	if len(loaded.Messages) != 1 {
 		t.Errorf("Messages len = %d, want 1", len(loaded.Messages))
 	}
+}
+
+// TestInMemoryStore_ListPage covers the SessionPaginator contract:
+// ordering, total count, default limit, negative limit, offset past
+// end, and parity with List for the unbounded case.
+func TestInMemoryStore_ListPage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Compile-time check that InMemoryStore satisfies the optional
+	// pagination interface.
+	var _ SessionPaginator = (*InMemoryStore)(nil)
+
+	store := NewInMemoryStore()
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		s := New()
+		s.Name = fmt.Sprintf("sess-%02d", i)
+		s.Updated = now.Add(time.Duration(i) * time.Second)
+		if err := store.Save(ctx, s); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	// First page: 3 newest, in updated-desc order.
+	got, err := store.ListPage(ctx, ListOptions{Limit: 3})
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if got.Total != 10 {
+		t.Errorf("Total = %d, want 10", got.Total)
+	}
+	if len(got.Sessions) != 3 {
+		t.Fatalf("Sessions len = %d, want 3", len(got.Sessions))
+	}
+	wantNames := []string{"sess-09", "sess-08", "sess-07"}
+	for i, want := range wantNames {
+		if got.Sessions[i].Name != want {
+			t.Errorf("Sessions[%d].Name = %q, want %q", i, got.Sessions[i].Name, want)
+		}
+	}
+
+	// Last partial page.
+	got, err = store.ListPage(ctx, ListOptions{Limit: 3, Offset: 9})
+	if err != nil {
+		t.Fatalf("ListPage offset=9: %v", err)
+	}
+	if got.Total != 10 {
+		t.Errorf("Total = %d, want 10", got.Total)
+	}
+	if len(got.Sessions) != 1 {
+		t.Errorf("Sessions len = %d, want 1", len(got.Sessions))
+	}
+	if got.Sessions[0].Name != "sess-00" {
+		t.Errorf("last page name = %q, want sess-00", got.Sessions[0].Name)
+	}
+
+	// Offset past end → empty page, total still correct.
+	got, err = store.ListPage(ctx, ListOptions{Limit: 3, Offset: 999})
+	if err != nil {
+		t.Fatalf("ListPage offset=999: %v", err)
+	}
+	if got.Total != 10 || len(got.Sessions) != 0 {
+		t.Errorf("offset past end: Total=%d Sessions=%d", got.Total, len(got.Sessions))
+	}
+
+	// Default limit kicks in at Limit=0.
+	store2 := NewInMemoryStore()
+	for i := 0; i < DefaultListLimit+10; i++ {
+		s := New()
+		s.Updated = now.Add(time.Duration(i) * time.Second)
+		store2.Save(ctx, s)
+	}
+	got, err = store2.ListPage(ctx, ListOptions{})
+	if err != nil {
+		t.Fatalf("ListPage default: %v", err)
+	}
+	if len(got.Sessions) != DefaultListLimit {
+		t.Errorf("default page len = %d, want %d", len(got.Sessions), DefaultListLimit)
+	}
+	if got.Total != DefaultListLimit+10 {
+		t.Errorf("default Total = %d, want %d", got.Total, DefaultListLimit+10)
+	}
+
+	// Negative limit returns everything.
+	got, err = store2.ListPage(ctx, ListOptions{Limit: -1})
+	if err != nil {
+		t.Fatalf("ListPage Limit=-1: %v", err)
+	}
+	if len(got.Sessions) != DefaultListLimit+10 {
+		t.Errorf("Limit=-1 len = %d, want %d", len(got.Sessions), DefaultListLimit+10)
+	}
+
+	// Parity with List for the unbounded case (set comparison).
+	listAll, err := store2.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !sameIDSet(listAll, got.Sessions) {
+		t.Error("ListPage(Limit=-1) and List returned different ID sets")
+	}
+}
+
+// sameIDSet returns true if both slices contain the same session IDs
+// regardless of order.
+func sameIDSet(a, b []*Session) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	idsA := make([]string, len(a))
+	idsB := make([]string, len(b))
+	for i := range a {
+		idsA[i] = a[i].ID
+		idsB[i] = b[i].ID
+	}
+	sort.Strings(idsA)
+	sort.Strings(idsB)
+	for i := range idsA {
+		if idsA[i] != idsB[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestInMemoryStore_BlocksRoundTrip is the Phase 1 completion gate: a

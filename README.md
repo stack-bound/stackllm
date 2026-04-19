@@ -135,6 +135,52 @@ provider.GeminiConfig("gemini-2.5-pro", auth.NewStatic(key))
 
 All five share the same `Complete(ctx, Request)` surface and return a streaming channel of block events (`BlockStart`, `BlockDelta`, `BlockEnd`, `ToolCall`, `Done`, `Error`). Each `BlockEnd` carries the fully accumulated `conversation.Block`; the agent concatenates them in order to build the assistant message, preserving any interleaving of thinking, text, and tool_use the model produced.
 
+## Sessions
+
+`session.SessionStore` is the persistence interface. `InMemoryStore` and `SQLiteStore` both ship in the box; embedders can implement their own (Redis, Postgres, etc.) when they need to.
+
+```go
+store, _ := session.OpenSQLiteStore(session.SQLiteConfig{AppName: "myapp"})
+defer store.Close()
+
+sess := session.New()
+sess.Name = "Refactor auth middleware" // optional, surfaced as a column
+store.Save(ctx, sess)
+
+loaded, _ := store.Load(ctx, sess.ID)
+all, _   := store.List(ctx) // every session, ordered by Updated desc
+```
+
+### Listing in pages
+
+`List(ctx)` returns every row in one slice — fine for small UIs, but unworkable once a long-running embedder accumulates thousands of conversations. Stores that can paginate opt into the optional `SessionPaginator` capability:
+
+```go
+type SessionPaginator interface {
+    ListPage(ctx context.Context, opts ListOptions) (ListResult, error)
+}
+```
+
+Both `InMemoryStore` and `SQLiteStore` implement it. Feature-detect via type assertion so custom stores stay free to omit it:
+
+```go
+if p, ok := store.(session.SessionPaginator); ok {
+    page, _ := p.ListPage(ctx, session.ListOptions{Limit: 25, Offset: 50})
+    fmt.Printf("page 3 of %d (%d rows)\n",
+        (page.Total+24)/25, page.Total)
+    for _, s := range page.Sessions {
+        fmt.Println(s.ID, s.Name)
+    }
+}
+```
+
+- `ListOptions{Limit, Offset}` — `Limit == 0` falls back to `session.DefaultListLimit` (50); a negative `Limit` returns every matching row (handy for "export everything"). Negative `Offset` is treated as 0.
+- `ListResult{Sessions, Total}` — `Total` is the row count ignoring `Limit`/`Offset`, so you can render "page X of Y" without a second query.
+- Sort order matches `List`: most-recently-updated first.
+- Like `List`, `ListPage` returns sessions with metadata populated and `Messages` empty — call `Load` for the rows you actually want to read in full.
+
+Filters beyond pagination (name search, date range, project filter, etc.) are deliberately left to the embedder for now: the `stackllm_sessions` schema is documented and stable, so apps that need them can drop down to the shared `*sql.DB` returned by `store.DB()` and write the join their domain needs.
+
 ## Packages
 
 | Package | Purpose |

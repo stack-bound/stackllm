@@ -1216,13 +1216,51 @@ func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
+// listSelectColumns is the column set both List and ListPage scan;
+// kept in one place so the two paths can never drift.
+const listSelectColumns = `id, name, project_path, model, state_json, created_at, updated_at,
+		       last_prompt_tokens, last_completion_tokens, last_total_tokens`
+
+// scanSessionRow reads one stackllm_sessions row in the order
+// listSelectColumns declares. Used by List and ListPage.
+func scanSessionRow(rows *sql.Rows) (*Session, error) {
+	var (
+		id               string
+		name             sql.NullString
+		projectPath      sql.NullString
+		model            sql.NullString
+		stateJSON        string
+		created          string
+		updated          string
+		promptTokens     sql.NullInt64
+		completionTokens sql.NullInt64
+		totalTokens      sql.NullInt64
+	)
+	if err := rows.Scan(&id, &name, &projectPath, &model, &stateJSON, &created, &updated,
+		&promptTokens, &completionTokens, &totalTokens); err != nil {
+		return nil, err
+	}
+	state, err := unmarshalState(stateJSON)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{
+		ID:          id,
+		Name:        name.String,
+		ProjectPath: projectPath.String,
+		Model:       model.String,
+		State:       state,
+		LastUsage:   usageFromCols(promptTokens, completionTokens, totalTokens),
+		Created:     parseTime(created),
+		Updated:     parseTime(updated),
+	}, nil
+}
+
 // List returns every session with metadata populated and Messages
 // empty. Callers call Load on demand for the ones they want to read
 // in full.
 func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, project_path, model, state_json, created_at, updated_at,
-		       last_prompt_tokens, last_completion_tokens, last_total_tokens
+	rows, err := s.db.QueryContext(ctx, `SELECT `+listSelectColumns+`
 		FROM stackllm_sessions
 		ORDER BY updated_at DESC`)
 	if err != nil {
@@ -1231,38 +1269,65 @@ func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
 	defer rows.Close()
 	var out []*Session
 	for rows.Next() {
-		var (
-			id               string
-			name             sql.NullString
-			projectPath      sql.NullString
-			model            sql.NullString
-			stateJSON        string
-			created          string
-			updated          string
-			promptTokens     sql.NullInt64
-			completionTokens sql.NullInt64
-			totalTokens      sql.NullInt64
-		)
-		if err := rows.Scan(&id, &name, &projectPath, &model, &stateJSON, &created, &updated,
-			&promptTokens, &completionTokens, &totalTokens); err != nil {
+		sess, err := scanSessionRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("session: List scan: %w", err)
 		}
-		state, err := unmarshalState(stateJSON)
-		if err != nil {
-			return nil, fmt.Errorf("session: List state: %w", err)
-		}
-		out = append(out, &Session{
-			ID:          id,
-			Name:        name.String,
-			ProjectPath: projectPath.String,
-			Model:       model.String,
-			State:       state,
-			LastUsage:   usageFromCols(promptTokens, completionTokens, totalTokens),
-			Created:     parseTime(created),
-			Updated:     parseTime(updated),
-		})
+		out = append(out, sess)
 	}
 	return out, rows.Err()
+}
+
+// ListPage returns one page of sessions ordered by updated_at desc
+// plus the total row count (ignoring Limit/Offset). Implements
+// SessionPaginator. A negative Limit disables the cap; a zero Limit
+// uses DefaultListLimit. Negative Offset is treated as 0.
+func (s *SQLiteStore) ListPage(ctx context.Context, opts ListOptions) (ListResult, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM stackllm_sessions`,
+	).Scan(&total); err != nil {
+		return ListResult{}, fmt.Errorf("session: ListPage count: %w", err)
+	}
+
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := opts.Limit
+	if limit == 0 {
+		limit = DefaultListLimit
+	}
+
+	q := `SELECT ` + listSelectColumns + `
+		FROM stackllm_sessions
+		ORDER BY updated_at DESC, id ASC`
+	var args []any
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	} else if offset > 0 {
+		q += ` LIMIT -1 OFFSET ?`
+		args = append(args, offset)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return ListResult{}, fmt.Errorf("session: ListPage: %w", err)
+	}
+	defer rows.Close()
+	out := []*Session{}
+	for rows.Next() {
+		sess, err := scanSessionRow(rows)
+		if err != nil {
+			return ListResult{}, fmt.Errorf("session: ListPage scan: %w", err)
+		}
+		out = append(out, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return ListResult{}, err
+	}
+	return ListResult{Sessions: out, Total: total}, nil
 }
 
 // ---------------------------------------------------------------------

@@ -162,6 +162,36 @@ message and block held by a session has a stable identifier, regardless
 of whether the caller built the message via `conversation.Builder` or
 assembled it by hand.
 
+#### Pagination (optional `SessionPaginator` capability)
+
+`SessionStore.List(ctx)` returns every session in one slice — fine for
+a small TUI picker, awkward once an embedder accumulates thousands of
+conversations. Stores that can paginate opt into the optional
+`SessionPaginator` capability (matching the `SessionForker` /
+`SessionExporter` pattern):
+
+```go
+type SessionPaginator interface {
+    ListPage(ctx context.Context, opts ListOptions) (ListResult, error)
+}
+```
+
+- `ListOptions{Limit, Offset}` — `Limit == 0` uses
+  `session.DefaultListLimit` (50); a negative `Limit` returns every
+  matching row. Negative `Offset` is treated as 0.
+- `ListResult{Sessions, Total}` — `Total` is the row count ignoring
+  `Limit`/`Offset` so callers can render "page X of Y".
+- Sort order matches `List`: most-recently-updated first.
+- Embedders feature-detect: `if p, ok := store.(session.SessionPaginator); ok { ... }`.
+- Both `InMemoryStore` and `SQLiteStore` implement it. Like `List`,
+  `ListPage` returns sessions with metadata populated and `Messages`
+  empty — call `Load` for the rows you actually want to render.
+
+Filters beyond pagination (name search, date range, etc.) are
+embedder territory for now: the `stackllm_sessions` schema is
+documented and stable, so apps that need them can query through the
+shared `*sql.DB` returned by `store.DB()`.
+
 #### Session persistence (SQLiteStore)
 
 `session.SQLiteStore` is the durable `SessionStore` implementation,
