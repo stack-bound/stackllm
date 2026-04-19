@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -227,50 +228,20 @@ func TestManagedHandler_CopilotDeviceFlow(t *testing.T) {
 	}
 }
 
-func TestManagedHandler_OpenAIOAuth_DisabledByDefault(t *testing.T) {
-	t.Parallel()
-	h := NewManagedHandler(newTestManager(t), session.NewInMemoryStore())
-
-	req := httptest.NewRequest("POST", "/providers/openai/oauth/login", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("start status = %d, want 404 when no client ID configured", w.Code)
-	}
-
-	req = httptest.NewRequest("GET", "/providers/openai/oauth/status", nil)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status status = %d, want 404 when no client ID configured", w.Code)
-	}
-}
-
 func TestManagedHandler_OpenAIOAuth_ReadyFlag(t *testing.T) {
 	t.Parallel()
 
-	// Without client ID, the /providers payload should signal that
-	// OAuth is not available so the UI can hide the button.
+	// OAuth is always ready now: the handler uses the Codex CLI's
+	// public OAuth client ID, so no configuration is required and
+	// the /providers payload always advertises openai_oauth_ready.
 	h := NewManagedHandler(newTestManager(t), session.NewInMemoryStore())
 	req := httptest.NewRequest("GET", "/providers", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	var payload map[string]any
 	json.Unmarshal(w.Body.Bytes(), &payload)
-	if payload["openai_oauth_ready"] != false {
-		t.Errorf("openai_oauth_ready = %v, want false", payload["openai_oauth_ready"])
-	}
-
-	// With client ID, it should flip to true.
-	h2 := NewManagedHandler(newTestManager(t), session.NewInMemoryStore(),
-		WithOpenAIOAuthClientID("my-client"))
-	req = httptest.NewRequest("GET", "/providers", nil)
-	w = httptest.NewRecorder()
-	h2.ServeHTTP(w, req)
-	payload = nil
-	json.Unmarshal(w.Body.Bytes(), &payload)
 	if payload["openai_oauth_ready"] != true {
-		t.Errorf("openai_oauth_ready = %v, want true", payload["openai_oauth_ready"])
+		t.Errorf("openai_oauth_ready = %v, want true (codex flow needs no client ID)", payload["openai_oauth_ready"])
 	}
 }
 
@@ -279,27 +250,40 @@ func TestManagedHandler_OpenAIOAuth_DeviceFlow(t *testing.T) {
 
 	authorise := make(chan struct{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/device/code", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/accounts/deviceauth/usercode", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"device_code":      "dev",
-			"user_code":        "OAI-WEB-1",
-			"verification_uri": "https://auth0.openai.com/activate",
-			"interval":         0,
-			"expires_in":       60,
+			"device_auth_id": "dev-web",
+			"user_code":      "OAI-WEB-1",
+			"interval":       0,
+			"expires_in":     60,
 		})
 	})
-	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/accounts/deviceauth/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		select {
 		case <-authorise:
 			json.NewEncoder(w).Encode(map[string]any{
-				"access_token": "oai-access",
-				"expires_in":   3600,
+				"authorization_code": "auth-code",
+				"code_verifier":      "code-verifier",
 			})
 		default:
-			json.NewEncoder(w).Encode(map[string]any{"error": "authorization_pending"})
+			// 403 signals "still waiting" to the codex device flow.
+			http.Error(w, "pending", http.StatusForbidden)
 		}
+	})
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		// Build an id_token that carries a chatgpt_account_id so
+		// Status can observe the flow completed end-to-end.
+		claims, _ := json.Marshal(map[string]any{"chatgpt_account_id": "acc-web"})
+		idToken := "h." + base64.RawURLEncoding.EncodeToString(claims) + ".s"
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "codex-access",
+			"refresh_token": "codex-refresh",
+			"id_token":      idToken,
+			"expires_in":    3600,
+		})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -308,8 +292,7 @@ func TestManagedHandler_OpenAIOAuth_DeviceFlow(t *testing.T) {
 		profile.WithHTTPClient(redirectClient(srv)),
 		profile.WithPollInterval(5*time.Millisecond),
 	)
-	h := NewManagedHandler(mgr, session.NewInMemoryStore(),
-		WithOpenAIOAuthClientID("test-client"))
+	h := NewManagedHandler(mgr, session.NewInMemoryStore())
 
 	req := httptest.NewRequest("POST", "/providers/openai/oauth/login", nil)
 	w := httptest.NewRecorder()
@@ -357,8 +340,7 @@ func TestManagedHandler_OpenAIOAuth_DeviceFlow(t *testing.T) {
 	}
 
 	// After success the /providers list must report openai as
-	// authenticated, because BeginOpenAIDeviceLogin mirrors the
-	// access token into the API-key slot.
+	// authenticated — the codex record is now the source of truth.
 	req = httptest.NewRequest("GET", "/providers", nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -373,7 +355,7 @@ func TestManagedHandler_OpenAIOAuth_DeviceFlow(t *testing.T) {
 		}
 	}
 	if !authed {
-		t.Error("openai should be reported authenticated after OAuth device flow")
+		t.Error("openai should be reported authenticated after codex device flow")
 	}
 }
 
@@ -450,24 +432,33 @@ func TestManagedHandler_Logout_CancelsInFlightOpenAIOAuth(t *testing.T) {
 
 	authorise := make(chan struct{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/device/code", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/accounts/deviceauth/usercode", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"device_code":      "dev",
-			"user_code":        "RACE-2",
-			"verification_uri": "https://auth0.openai.com/activate",
-			"interval":         0,
-			"expires_in":       60,
+			"device_auth_id": "dev-race",
+			"user_code":      "RACE-2",
+			"interval":       0,
+			"expires_in":     60,
 		})
+	})
+	mux.HandleFunc("/api/accounts/deviceauth/token", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-authorise:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"authorization_code": "should-not-land",
+				"code_verifier":      "v",
+			})
+		default:
+			http.Error(w, "pending", http.StatusForbidden)
+		}
 	})
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		select {
-		case <-authorise:
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "oai-should-not-land", "expires_in": 3600})
-		default:
-			json.NewEncoder(w).Encode(map[string]any{"error": "authorization_pending"})
-		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "should-not-land",
+			"expires_in":   3600,
+		})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -479,8 +470,7 @@ func TestManagedHandler_Logout_CancelsInFlightOpenAIOAuth(t *testing.T) {
 		profile.WithHTTPClient(redirectClient(srv)),
 		profile.WithPollInterval(5*time.Millisecond),
 	)
-	h := NewManagedHandler(mgr, session.NewInMemoryStore(),
-		WithOpenAIOAuthClientID("test-client"))
+	h := NewManagedHandler(mgr, session.NewInMemoryStore())
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("POST", "/providers/openai/oauth/login", nil))
@@ -500,8 +490,8 @@ func TestManagedHandler_Logout_CancelsInFlightOpenAIOAuth(t *testing.T) {
 	if _, err := authStore.Load(context.Background(), "openai_api_key"); err == nil {
 		t.Error("openai api-key slot should remain cleared after logout")
 	}
-	if _, err := authStore.Load(context.Background(), "openai_token"); err == nil {
-		t.Error("openai oauth record should remain cleared after logout")
+	if _, err := authStore.Load(context.Background(), auth.CodexStoreKey); err == nil {
+		t.Error("openai codex record should remain cleared after logout")
 	}
 }
 

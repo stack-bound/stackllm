@@ -52,6 +52,12 @@ type Callbacks struct {
 
 	// OnPromptURL prompts the user for a base URL (e.g. Ollama).
 	OnPromptURL func(providerName, defaultURL string) (string, error)
+
+	// OnOpenURL is invoked during browser-based OAuth flows (e.g.
+	// OpenAI Codex PKCE) with the authorization URL the user should
+	// open in a browser. The callback may either print the URL or
+	// launch a browser automatically.
+	OnOpenURL func(authURL string)
 }
 
 // ProviderStatus describes the authentication state of a single provider.
@@ -180,6 +186,42 @@ func (m *Manager) loginAPIKey(ctx context.Context, name, storeKey string) error 
 	return nil
 }
 
+// LoginOpenAICodexDevice runs the OpenAI Codex device-code OAuth
+// flow end-to-end using the Codex CLI's public client ID, so the
+// user can sign in with their ChatGPT account without registering an
+// OAuth app or entering an API key. Uses the manager's OnDeviceCode
+// / OnPolling / OnSuccess callbacks to surface the user code.
+func (m *Manager) LoginOpenAICodexDevice(ctx context.Context) error {
+	src := auth.NewCodexDeviceSource(auth.CodexDeviceConfig{
+		Store:        m.authStore,
+		OnCode:       m.callbacks.OnDeviceCode,
+		OnPolling:    m.callbacks.OnPolling,
+		OnSuccess:    m.callbacks.OnSuccess,
+		PollInterval: m.pollInterval,
+		HTTPClient:   m.httpClient,
+	})
+	return src.Login(ctx)
+}
+
+// LoginOpenAICodexWeb runs the OpenAI Codex PKCE flow end-to-end with
+// a local http://localhost:1455/auth/callback listener. The
+// OnPromptURL callback is re-used to surface the authorization URL
+// that the user should open in a browser. On success the long-lived
+// token and refresh token are persisted.
+func (m *Manager) LoginOpenAICodexWeb(ctx context.Context) error {
+	src := auth.NewCodexWebFlowSource(auth.CodexWebFlowConfig{
+		Store: m.authStore,
+		OnOpenURL: func(authURL string) {
+			if m.callbacks.OnOpenURL != nil {
+				m.callbacks.OnOpenURL(authURL)
+			}
+		},
+		OnSuccess:  m.callbacks.OnSuccess,
+		HTTPClient: m.httpClient,
+	})
+	return src.Login(ctx)
+}
+
 func (m *Manager) loginCopilot(ctx context.Context) error {
 	src := auth.NewCopilotSource(auth.CopilotConfig{
 		Store:        m.authStore,
@@ -224,21 +266,28 @@ func (m *Manager) loginOllama(ctx context.Context) error {
 
 // Logout clears stored credentials for the named provider.
 //
-// For OpenAI this clears both the API-key slot and the OAuth device
-// flow token record, so a user who logged in via BeginOpenAIDeviceLogin
-// (which writes both) is fully logged out after a single call.
+// For OpenAI this clears every slot any login path may have written
+// to — the API key, the legacy API-audience device-flow record, the
+// legacy PKCE web-flow record, and the codex-flow record — so a user
+// is fully logged out regardless of which path they used.
 func (m *Manager) Logout(ctx context.Context, providerName string) error {
 	switch providerName {
 	case ProviderOpenAI:
 		if err := m.authStore.Delete(ctx, keyOpenAI); err != nil {
 			return err
 		}
-		// The OAuth device-flow source owns its own store key; ask
-		// the source to clear it so we don't couple profile to the
-		// internal auth constant. Delete on a missing key is a
-		// no-op for the stock stores, so this is safe even when the
-		// user never ran an OAuth login.
-		return auth.NewOpenAIDeviceSource(auth.OpenAIDeviceConfig{Store: m.authStore}).Logout(ctx)
+		// The OAuth sources own their own store keys; ask each to
+		// clear itself so we don't couple profile to internal auth
+		// constants. Delete on a missing key is a no-op for the
+		// stock stores, so this is safe even when the user only
+		// used one of the login paths.
+		if err := auth.NewOpenAIDeviceSource(auth.OpenAIDeviceConfig{Store: m.authStore}).Logout(ctx); err != nil {
+			return err
+		}
+		if err := auth.NewOpenAIWebFlowSource(auth.OpenAIWebFlowConfig{Store: m.authStore}).Logout(ctx); err != nil {
+			return err
+		}
+		return auth.NewCodexDeviceSource(auth.CodexDeviceConfig{Store: m.authStore}).Logout(ctx)
 	case ProviderGemini:
 		return m.authStore.Delete(ctx, keyGemini)
 	case ProviderCopilot:
@@ -276,8 +325,16 @@ func (m *Manager) Status(ctx context.Context) ([]ProviderStatus, error) {
 func (m *Manager) isAuthenticated(ctx context.Context, name string, cfg *config.Config) bool {
 	switch name {
 	case ProviderOpenAI:
-		_, err := m.authStore.Load(ctx, keyOpenAI)
-		return err == nil
+		if _, err := m.authStore.Load(ctx, keyOpenAI); err == nil {
+			return true
+		}
+		// A codex-flow sign-in counts as OpenAI authentication even
+		// though it hits a different endpoint — buildProvider
+		// prefers the API key when both are present.
+		if _, err := auth.LoadCodexRecord(ctx, m.authStore); err == nil {
+			return true
+		}
+		return false
 	case ProviderGemini:
 		_, err := m.authStore.Load(ctx, keyGemini)
 		return err == nil
@@ -323,10 +380,52 @@ func (m *Manager) ListProviderModels(ctx context.Context, providerName string) (
 	return m.listModelsForProvider(ctx, providerName)
 }
 
+// codexModels is the list of models OpenAI authorises via the
+// Codex OAuth flow. The /models endpoint at chatgpt.com/backend-api
+// is not publicly exposed the way api.openai.com/v1/models is, so we
+// ship the allowlist the official Codex CLI and opencode use — the
+// embedder should not have to maintain this.
+func codexModels() []ModelInfo {
+	ids := []string{
+		"gpt-5",
+		"gpt-5-codex",
+		"gpt-5.1-codex",
+		"gpt-5.1-codex-max",
+		"gpt-5.1-codex-mini",
+		"gpt-5.2",
+		"gpt-5.2-codex",
+		"gpt-5.3-codex",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+	}
+	out := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, ModelInfo{
+			Provider:      ProviderOpenAI,
+			Model:         id,
+			Endpoint:      provider.EndpointResponses,
+			ContextWindow: provider.ContextWindow(id),
+		})
+	}
+	return out
+}
+
 // listModelsForProvider returns ModelInfo entries for a single provider's
 // chat-capable models, with each entry's Endpoint populated from the
 // model's metadata. Embedding-only models are filtered out.
 func (m *Manager) listModelsForProvider(ctx context.Context, providerName string) ([]ModelInfo, error) {
+	// Short-circuit for OpenAI when the user is signed in via codex
+	// only: the codex provider endpoint doesn't expose /models, so
+	// fall back to the hardcoded allowlist that the official Codex
+	// CLI uses.
+	if providerName == ProviderOpenAI {
+		if _, err := m.authStore.Load(ctx, keyOpenAI); err != nil {
+			if _, err := auth.LoadCodexRecord(ctx, m.authStore); err == nil {
+				return codexModels(), nil
+			}
+		}
+	}
+
 	p, err := m.buildProvider(ctx, providerName, "", provider.EndpointChatCompletions)
 	if err != nil {
 		return nil, fmt.Errorf("profile: build provider for models: %w", err)
@@ -595,13 +694,39 @@ func (m *Manager) LoadProviderForModel(ctx context.Context, info ModelInfo) (*pr
 func (m *Manager) buildProvider(ctx context.Context, providerName, model, endpoint string) (*provider.OpenAIProvider, error) {
 	switch providerName {
 	case ProviderOpenAI:
-		key, err := m.authStore.Load(ctx, keyOpenAI)
+		// Prefer a static API key when one is stored — that path works
+		// against api.openai.com and respects whatever model the user
+		// picked. Fall back to a codex-flow token (ChatGPT sign-in),
+		// which has to be routed to chatgpt.com/backend-api/codex with
+		// the ChatGPT-Account-Id header.
+		if key, err := m.authStore.Load(ctx, keyOpenAI); err == nil {
+			ts := auth.NewStatic(key)
+			cfg := provider.OpenAIConfig(model, ts)
+			cfg.Endpoint = endpoint
+			if m.httpClient != nil {
+				cfg.HTTPClient = m.httpClient
+			}
+			return provider.New(cfg), nil
+		}
+
+		rec, err := auth.LoadCodexRecord(ctx, m.authStore)
 		if err != nil {
 			return nil, fmt.Errorf("profile: openai not authenticated: %w", err)
 		}
-		ts := auth.NewStatic(key)
-		cfg := provider.OpenAIConfig(model, ts)
-		cfg.Endpoint = endpoint
+		src := auth.NewCodexDeviceSource(auth.CodexDeviceConfig{
+			Store:      m.authStore,
+			HTTPClient: m.httpClient,
+		})
+		cfg := provider.OpenAIConfig(model, auth.NewCachingSource(src))
+		cfg.BaseURL = auth.CodexProviderBaseURL
+		// Codex-flow tokens are only accepted on /responses.
+		cfg.Endpoint = provider.EndpointResponses
+		cfg.ExtraHeaders = map[string]string{
+			auth.CodexOriginatorHeader: "stackllm",
+		}
+		if rec.ChatGPTAccountID != "" {
+			cfg.ExtraHeaders[auth.CodexAccountHeader] = rec.ChatGPTAccountID
+		}
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient
 		}

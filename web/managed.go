@@ -24,8 +24,8 @@ import (
 //
 //	GET    /providers                       — auth status for every provider
 //	POST   /providers/openai/login          — body {"key":"..."} (API key)
-//	POST   /providers/openai/oauth/login    — starts OpenAI OAuth device flow (requires WithOpenAIOAuthClientID)
-//	GET    /providers/openai/oauth/status   — polls in-progress OpenAI device flow
+//	POST   /providers/openai/oauth/login    — starts OpenAI Codex device flow (ChatGPT sign-in)
+//	GET    /providers/openai/oauth/status   — polls in-progress Codex device flow
 //	POST   /providers/gemini/login          — body {"key":"..."}
 //	POST   /providers/ollama/login          — body {"base_url":"..."} (optional)
 //	POST   /providers/copilot/login         — starts GitHub device flow, returns code
@@ -44,16 +44,22 @@ import (
 // first. Each chat request builds a fresh provider from the current
 // default so the UI can switch models without restarting the server.
 type ManagedHandler struct {
-	mgr                 *profile.Manager
-	store               session.SessionStore
-	agentOpts           []agent.Option
-	openaiOAuthClientID string
-	mux                 *http.ServeMux
+	mgr       *profile.Manager
+	store     session.SessionStore
+	agentOpts []agent.Option
+	mux       *http.ServeMux
 
 	// Active device flows. At most one per provider runs at a time
 	// so the UI can call the status endpoint without carrying a flow
 	// ID. Starting a new flow while one is pending surfaces the
 	// existing code so the user's open tab stays valid.
+	//
+	// The browser/PKCE flow is intentionally NOT exposed here: it
+	// requires the OAuth callback to land on the same machine as
+	// the user's browser, which is only true for a local dev
+	// deployment. Remote-hosted web UIs should use the device flow
+	// (which works regardless of where the server lives) or the CLI
+	// helper in examples/login.
 	mu         sync.Mutex
 	copilotFlw *profile.DeviceFlow
 	openaiFlw  *profile.DeviceFlow
@@ -68,14 +74,17 @@ func WithAgentOptions(opts ...agent.Option) ManagedOption {
 	return func(h *ManagedHandler) { h.agentOpts = append(h.agentOpts, opts...) }
 }
 
-// WithOpenAIOAuthClientID enables the OpenAI OAuth device-flow login
-// endpoints. OpenAI does not publish a public OAuth client ID for
-// third parties, so the embedder must supply their own (registered
-// via the OpenAI platform OAuth app settings). When unset, the
-// OAuth endpoints return 404 and the UI should fall back to the
-// API-key login.
-func WithOpenAIOAuthClientID(id string) ManagedOption {
-	return func(h *ManagedHandler) { h.openaiOAuthClientID = id }
+// WithOpenAIOAuthClientID is retained for backwards compatibility
+// but is now a no-op: the ManagedHandler always enables the OpenAI
+// OAuth endpoints and drives them through the Codex CLI's public
+// OAuth client ID. Embedders that want to use their own registered
+// OpenAI OAuth app should call profile.Manager.BeginOpenAIDeviceLogin
+// directly with their client ID and skip the ManagedHandler's
+// /oauth and /pkce routes.
+//
+// Deprecated: codex-flow sign-in requires no client ID.
+func WithOpenAIOAuthClientID(_ string) ManagedOption {
+	return func(*ManagedHandler) {}
 }
 
 // NewManagedHandler wires a profile.Manager and session store into a
@@ -121,9 +130,12 @@ func (h *ManagedHandler) handleListProviders(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// openai_oauth_ready used to advertise whether an embedder-supplied
+	// client ID was configured. The codex flow works without one, so
+	// it's now always true — kept for UI backwards compatibility.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"providers":          statuses,
-		"openai_oauth_ready": h.openaiOAuthClientID != "",
+		"openai_oauth_ready": true,
 	})
 }
 
@@ -164,11 +176,6 @@ func (h *ManagedHandler) handleOllamaLogin(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *ManagedHandler) handleOpenAIOAuthStart(w http.ResponseWriter, r *http.Request) {
-	if h.openaiOAuthClientID == "" {
-		writeJSONError(w, http.StatusNotFound, fmt.Errorf("openai oauth not configured — construct the handler with WithOpenAIOAuthClientID"))
-		return
-	}
-
 	h.mu.Lock()
 	if h.openaiFlw != nil && h.openaiFlw.State() == profile.DeviceFlowPending {
 		flow := h.openaiFlw
@@ -178,7 +185,7 @@ func (h *ManagedHandler) handleOpenAIOAuthStart(w http.ResponseWriter, r *http.R
 	}
 	h.mu.Unlock()
 
-	flow, err := h.mgr.BeginOpenAIDeviceLogin(r.Context(), h.openaiOAuthClientID)
+	flow, err := h.mgr.BeginOpenAICodexDeviceLogin(r.Context())
 	if err != nil {
 		status := http.StatusInternalServerError
 		if flow != nil && flow.State() == profile.DeviceFlowError {
@@ -196,10 +203,6 @@ func (h *ManagedHandler) handleOpenAIOAuthStart(w http.ResponseWriter, r *http.R
 }
 
 func (h *ManagedHandler) handleOpenAIOAuthStatus(w http.ResponseWriter, r *http.Request) {
-	if h.openaiOAuthClientID == "" {
-		writeJSONError(w, http.StatusNotFound, fmt.Errorf("openai oauth not configured"))
-		return
-	}
 	h.mu.Lock()
 	flow := h.openaiFlw
 	h.mu.Unlock()
@@ -293,25 +296,25 @@ func (h *ManagedHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 // request.
 func (h *ManagedHandler) cancelPendingFlow(ctx context.Context, providerName string) {
 	h.mu.Lock()
-	var flow *profile.DeviceFlow
+	var dev *profile.DeviceFlow
 	switch providerName {
 	case profile.ProviderCopilot:
-		flow = h.copilotFlw
+		dev = h.copilotFlw
 		h.copilotFlw = nil
 	case profile.ProviderOpenAI:
-		flow = h.openaiFlw
+		dev = h.openaiFlw
 		h.openaiFlw = nil
 	}
 	h.mu.Unlock()
 
-	if flow == nil {
+	if dev == nil {
 		return
 	}
-	flow.Cancel()
+	dev.Cancel()
 
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_ = flow.Wait(waitCtx)
+	_ = dev.Wait(waitCtx)
 }
 
 // ---- Models ----

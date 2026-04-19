@@ -35,6 +35,9 @@ func main() {
 		OnSuccess: func() {
 			fmt.Println("\nAuthenticated!")
 		},
+		OnOpenURL: func(authURL string) {
+			fmt.Printf("\nOpen this URL in your browser to sign in:\n%s\n\nWaiting for callback...\n", authURL)
+		},
 		OnPromptKey: func(providerName string) (string, error) {
 			fmt.Printf("Enter API key for %s: ", providerName)
 			scanner := bufio.NewScanner(os.Stdin)
@@ -64,10 +67,16 @@ func main() {
 		switch os.Args[1] {
 		case "login":
 			if len(os.Args) < 3 {
-				fmt.Fprintln(os.Stderr, "Usage: login <provider>")
+				fmt.Fprintln(os.Stderr, "Usage: login <provider> [method]")
+				fmt.Fprintln(os.Stderr, "  method for openai: key | device | web (default: device)")
 				os.Exit(1)
 			}
-			if err := mgr.Login(ctx, os.Args[2]); err != nil {
+			provider := os.Args[2]
+			method := ""
+			if len(os.Args) > 3 {
+				method = os.Args[3]
+			}
+			if err := loginProvider(ctx, mgr, provider, method); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -166,11 +175,73 @@ func menuLogin(ctx context.Context, mgr *profile.Manager, scanner *bufio.Scanner
 	}
 
 	providerName := providers[idx-1]
-	if err := mgr.Login(ctx, providerName); err != nil {
+
+	method := ""
+	if providerName == profile.ProviderOpenAI {
+		method = promptOpenAIMethod(scanner)
+		if method == "" {
+			return
+		}
+	}
+
+	if err := loginProvider(ctx, mgr, providerName, method); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
 	}
 	fmt.Printf("Logged in to %s.\n", providerName)
+}
+
+// promptOpenAIMethod asks the user to pick between API key / device
+// flow / web flow. Device flow is the default because it works on
+// headless machines; web flow opens a browser but is smoother when
+// one is available. Returns "" if the user cancels.
+func promptOpenAIMethod(scanner *bufio.Scanner) string {
+	fmt.Println()
+	fmt.Println("OpenAI login methods:")
+	fmt.Println("  1) Sign in with ChatGPT — device code (recommended, headless)")
+	fmt.Println("  2) Sign in with ChatGPT — browser (opens a URL, local callback)")
+	fmt.Println("  3) Enter an OpenAI API key")
+	fmt.Println()
+	fmt.Print("Choose [1]: ")
+	if !scanner.Scan() {
+		return ""
+	}
+	v := strings.TrimSpace(scanner.Text())
+	if v == "" {
+		v = "1"
+	}
+	switch v {
+	case "1", "device":
+		return "device"
+	case "2", "web", "browser":
+		return "web"
+	case "3", "key", "api":
+		return "key"
+	default:
+		fmt.Println("Invalid choice.")
+		return ""
+	}
+}
+
+// loginProvider dispatches to the appropriate profile method based
+// on provider + method. For OpenAI an empty method means "device" —
+// the ChatGPT sign-in flow is the simplest path, matches the
+// interactive menu's default, and doesn't require the user to paste
+// an API key. For other providers method is ignored.
+func loginProvider(ctx context.Context, mgr *profile.Manager, providerName, method string) error {
+	if providerName == profile.ProviderOpenAI {
+		switch method {
+		case "", "device":
+			return mgr.LoginOpenAICodexDevice(ctx)
+		case "web", "browser":
+			return mgr.LoginOpenAICodexWeb(ctx)
+		case "key":
+			return mgr.Login(ctx, providerName)
+		default:
+			return fmt.Errorf("unknown openai login method %q (expected device|web|key)", method)
+		}
+	}
+	return mgr.Login(ctx, providerName)
 }
 
 func menuLogout(ctx context.Context, mgr *profile.Manager, scanner *bufio.Scanner) {

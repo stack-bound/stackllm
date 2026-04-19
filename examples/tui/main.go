@@ -3,6 +3,16 @@
 // Uses the default provider if configured (via go run ./examples/login),
 // otherwise falls back to OPENAI_API_KEY environment variable.
 //
+// To sign in with a ChatGPT account (no API key needed), run:
+//
+//	go run ./examples/login login openai device   # headless device code
+//	go run ./examples/login login openai web      # browser PKCE flow
+//	go run ./examples/login login openai key      # paste an API key
+//
+// Then pick a model with:
+//
+//	go run ./examples/login default
+//
 // Usage:
 //
 //	go run ./examples/tui

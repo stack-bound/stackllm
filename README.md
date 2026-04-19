@@ -11,7 +11,7 @@ You own the `[]Message` — the library provides the loop and the plumbing.
 - **Full context control** — the caller owns the message slice and decides what goes in it
 - **Block-shaped messages** — each message holds an ordered slice of typed blocks (text, thinking, tool_use, tool_result, image, redacted_thinking), so interleaved assistant output replays faithfully
 - **Durable session store** — pure-Go SQLite (`modernc.org/sqlite`) backing for branching message trees, artifact offload for large tool outputs and images, and FTS5 search across block types; shares the same file with parent-app tables
-- **Built-in auth** — static API keys, GitHub device flow for Copilot, device and web/PKCE OAuth for OpenAI, with file-backed storage and expiry handling
+- **Built-in auth** — static API keys, GitHub device flow for Copilot, "Sign in with ChatGPT" for OpenAI (Codex OAuth — device or browser, no API key, no app registration), plus device/PKCE OAuth against the standard OpenAI API for embedders with their own registered app. File-backed storage with expiry handling.
 - **Tool system** — register Go functions as tools with auto-generated JSON Schema
 - **ReAct agent loop** — streaming `Step`/`Run` with per-block hooks, plus runtime provider/model swap
 - **Model discovery** — list and switch between every chat-capable model on every authenticated provider
@@ -92,13 +92,19 @@ If you would rather wire a provider up directly without the manager, skip to [Pr
 ```go
 mgr := profile.New(profile.WithCallbacks(profile.Callbacks{
     OnDeviceCode: func(userCode, verifyURL string) { /* show code */ },
+    OnOpenURL:    func(authURL string) { /* open browser for PKCE sign-in */ },
     OnPromptKey:  func(providerName string) (string, error) { /* read API key */ },
     OnPromptURL:  func(providerName, defaultURL string) (string, error) { /* read URL */ },
 }))
 
-// Authenticate — API key for OpenAI/Gemini, GitHub device flow for Copilot,
+// Authenticate — GitHub device flow for Copilot, API key for Gemini,
 // base URL prompt for Ollama.
 mgr.Login(ctx, profile.ProviderCopilot)
+
+// OpenAI has three paths; pick whichever fits the UX:
+mgr.LoginOpenAICodexDevice(ctx) // "Sign in with ChatGPT" — headless device code
+mgr.LoginOpenAICodexWeb(ctx)    // "Sign in with ChatGPT" — browser + local callback
+mgr.Login(ctx, profile.ProviderOpenAI) // paste an API key (uses OnPromptKey)
 
 // See which providers are authenticated and which is the default.
 statuses, _ := mgr.Status(ctx)
@@ -150,12 +156,12 @@ Runnable examples live in `examples/`.
 
 | Example | Description |
 |---|---|
-| `examples/login` | Interactive CLI for provider management — login, logout, status, browse models, and set the default. Subcommand shortcuts (`login copilot`, `status`, `models`, `default copilot/gpt-4o`) for scripting. |
+| `examples/login` | Interactive CLI for provider management — login, logout, status, browse models, and set the default. For OpenAI the menu prompts between device-code ChatGPT sign-in (default), browser ChatGPT sign-in, or an API key; subcommand shortcuts (`login openai device`, `login openai web`, `login openai key`, `login copilot`, `status`, `models`, `default copilot/gpt-4o`) are available for scripting. |
 | `examples/simple` | Minimal agent with `greet` and `add` tools. Walks the user through provider login and model selection on first run, then uses the persisted default on subsequent runs. |
 | `examples/copilot` | Direct Copilot wiring without the manager — shows the two-phase GitHub device flow and caching token source. |
 | `examples/tui` | Full Bubbletea TUI agent. Streams tokens as they arrive, renders tool calls and results inline, supports Ctrl+V image paste (inserts a `[Image #N]` placeholder and attaches a `BlockImage` on send), and supports slash commands: `/models` to switch provider/model at runtime (with recently-used models surfaced first), `/new` to start a fresh session. Uses the persisted default or falls back to `OPENAI_API_KEY`. |
 | `examples/sqlite` | Shared-DB demo for `session.SQLiteStore`: opens a single SQLite file, runs a parent-app migration (`memories` table), hands the same `*sql.DB` to `session.NewSQLiteStore`, saves a conversation, and queries both namespaces to prove coexistence. No network calls — usable as a CI smoke test. |
-| `examples/web` | Browser-only embedding. Serves `web.ManagedHandler` under `/api/*` and a minimal single-page UI at `/` that drives provider login (API keys, Ollama URL, Copilot device flow), model selection, default setting, and streaming chat — all over HTTP with no TUI. |
+| `examples/web` | Browser-only embedding. Serves `web.ManagedHandler` under `/api/*` and a minimal single-page UI at `/` that drives provider login (API keys, Ollama URL, Copilot device flow, "Sign in with ChatGPT" for OpenAI), model selection, default setting, and streaming chat — all over HTTP with no TUI. The ChatGPT browser/PKCE flow is deliberately CLI-only because its OAuth callback lands on the user's localhost, not the server's — remote-hosted web UIs should use the device-code flow (which works regardless of where the server lives). |
 
 Run any of them with `go run ./examples/<name>`.
 

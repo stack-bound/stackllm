@@ -275,6 +275,36 @@ func (m *Manager) BeginCopilotLogin(parent context.Context) (*DeviceFlow, error)
 	)
 }
 
+// BeginOpenAICodexDeviceLogin starts the OpenAI Codex device-code
+// OAuth flow in the background using the Codex CLI's public client
+// ID. No OAuth app registration is required — the resulting token
+// is bound to the user's ChatGPT account and must be used against
+// auth.CodexProviderBaseURL with the ChatGPT-Account-Id header set.
+// profile.buildProvider handles that routing automatically when it
+// detects a codex record in the store.
+//
+// Blocks until the device code is issued, then drives polling in
+// the background. The returned DeviceFlow can be polled for
+// completion via DeviceFlow.State().
+func (m *Manager) BeginOpenAICodexDeviceLogin(parent context.Context) (*DeviceFlow, error) {
+	var src *auth.CodexDeviceSource
+	return runDeviceFlow(
+		parent,
+		func(capture func(userCode, verifyURL string)) {
+			src = auth.NewCodexDeviceSource(auth.CodexDeviceConfig{
+				Store:        m.authStore,
+				PollInterval: m.pollInterval,
+				HTTPClient:   m.httpClient,
+				OnCode:       capture,
+				OnPolling:    m.callbacks.OnPolling,
+				OnSuccess:    m.callbacks.OnSuccess,
+			})
+		},
+		func(ctx context.Context) error { return src.Login(ctx) },
+		nil,
+	)
+}
+
 // BeginOpenAIDeviceLogin starts the OpenAI OAuth device-code flow
 // using the supplied OAuth client ID. It mirrors BeginCopilotLogin:
 // blocks until the device code is issued, then drives polling in the
@@ -290,6 +320,9 @@ func (m *Manager) BeginCopilotLogin(parent context.Context) (*DeviceFlow, error)
 // The clientID is supplied by the embedder because OpenAI does not
 // publish a single public OAuth client ID for third parties — each
 // application registers its own.
+//
+// Most embedders will prefer BeginOpenAICodexDeviceLogin, which uses
+// the Codex CLI's public client ID and requires no app registration.
 func (m *Manager) BeginOpenAIDeviceLogin(parent context.Context, clientID string) (*DeviceFlow, error) {
 	if clientID == "" {
 		return nil, fmt.Errorf("profile: BeginOpenAIDeviceLogin: client ID is required")

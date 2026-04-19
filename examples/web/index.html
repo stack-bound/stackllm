@@ -56,7 +56,7 @@
     </div>
     <div class="row" id="openaiOAuthRow" hidden>
       <span class="muted">— or —</span>
-      <button id="btnOpenAIOAuth">Log in with OpenAI</button>
+      <button id="btnOpenAIOAuth">Sign in with ChatGPT (device code)</button>
     </div>
   </div>
 
@@ -109,8 +109,6 @@ const api = (path, init) => fetch("/api" + path, init).then(async r => {
   return { ok: r.ok, status: r.status, body };
 });
 
-let openaiOAuthReady = false;
-
 async function refreshProviders() {
   const res = await api("/providers");
   const tbody = document.getElementById("providerTable");
@@ -119,7 +117,6 @@ async function refreshProviders() {
     tbody.innerHTML = `<tr><td colspan="3">Error: ${res.body?.error || res.status}</td></tr>`;
     return;
   }
-  openaiOAuthReady = !!res.body.openai_oauth_ready;
   for (const p of res.body.providers) {
     const tr = document.createElement("tr");
     const authClass = p.authenticated ? "ok" : "bad";
@@ -139,16 +136,14 @@ async function refreshProviders() {
       await refreshProviders();
     });
   });
-  // The OAuth button is OpenAI-only and only surfaces when the
-  // server advertises that a client ID has been configured.
   const pick = document.getElementById("providerPick").value;
-  document.getElementById("openaiOAuthRow").hidden = !(pick === "openai" && openaiOAuthReady);
+  document.getElementById("openaiOAuthRow").hidden = pick !== "openai";
 }
 
 function showForm() {
   const pick = document.getElementById("providerPick").value;
   document.getElementById("apiKeyForm").hidden = !(pick === "openai" || pick === "gemini");
-  document.getElementById("openaiOAuthRow").hidden = !(pick === "openai" && openaiOAuthReady);
+  document.getElementById("openaiOAuthRow").hidden = pick !== "openai";
   document.getElementById("ollamaForm").hidden = pick !== "ollama";
   document.getElementById("copilotForm").hidden = pick !== "copilot";
   document.getElementById("deviceProgress").hidden = true;
@@ -240,7 +235,7 @@ function copilotStart() {
 }
 
 function openaiOAuthStart() {
-  return startDeviceFlow("OpenAI", "/providers/openai/oauth/login", "/providers/openai/oauth/status");
+  return startDeviceFlow("OpenAI (device code)", "/providers/openai/oauth/login", "/providers/openai/oauth/status");
 }
 
 async function refreshModels() {

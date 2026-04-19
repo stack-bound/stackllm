@@ -59,15 +59,11 @@ func main() {
 
 	store := session.NewInMemoryStore()
 
-	opts := []web.ManagedOption{}
-	if cid := os.Getenv("STACKLLM_OPENAI_CLIENT_ID"); cid != "" {
-		opts = append(opts, web.WithOpenAIOAuthClientID(cid))
-		fmt.Println("OpenAI OAuth device flow enabled")
-	} else {
-		fmt.Println("OpenAI OAuth device flow disabled (set STACKLLM_OPENAI_CLIENT_ID to enable)")
-	}
-
-	api := web.NewManagedHandler(mgr, store, opts...)
+	// Sign-in-with-ChatGPT (device + PKCE) is always available — the
+	// handler uses the Codex CLI's public OAuth client ID so no app
+	// registration is required. Users who prefer a plain API key can
+	// still paste one into the UI.
+	api := web.NewManagedHandler(mgr, store)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", api))

@@ -362,15 +362,22 @@ func TestLogoutOpenAI(t *testing.T) {
 	ctx := context.Background()
 
 	mgr, as, _ := testManager(t)
+	// Seed every slot any OpenAI login path may have written to so we
+	// can verify Logout clears them all — a prior bug left the legacy
+	// PKCE web-flow refresh token on disk after logout.
 	as.Save(ctx, keyOpenAI, "sk-to-delete")
+	as.Save(ctx, "openai_token", `{"access_token":"legacy-device"}`)
+	as.Save(ctx, "openai_web_token", `{"access_token":"legacy-web"}`)
+	as.Save(ctx, auth.CodexStoreKey, `{"access_token":"codex-acc"}`)
 
 	if err := mgr.Logout(ctx, ProviderOpenAI); err != nil {
 		t.Fatalf("Logout error: %v", err)
 	}
 
-	_, err := as.Load(ctx, keyOpenAI)
-	if err == nil {
-		t.Error("key should be deleted after logout")
+	for _, key := range []string{keyOpenAI, "openai_token", "openai_web_token", auth.CodexStoreKey} {
+		if _, err := as.Load(ctx, key); err == nil {
+			t.Errorf("auth store key %q should be cleared after logout", key)
+		}
 	}
 }
 
@@ -1335,5 +1342,200 @@ func TestTrackRecentModel_Validation(t *testing.T) {
 	}
 	if err := mgr.TrackRecentModel(ctx, ModelInfo{Provider: "openai"}); err == nil {
 		t.Error("expected error for empty model")
+	}
+}
+
+// saveCodexRecord writes a fake codex credential into the store so
+// tests can exercise the codex-flow routing without running the
+// OAuth dance. Mirrors auth.saveCodexRecord (unexported there) — the
+// store key and JSON shape are the on-wire contract.
+func writeCodexRecord(t *testing.T, as *auth.MemoryStore, accountID string) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"access_token":       "codex-access",
+		"refresh_token":      "codex-refresh",
+		"chatgpt_account_id": accountID,
+		"expires_at":         time.Now().Add(time.Hour).Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("marshal codex record: %v", err)
+	}
+	if err := as.Save(context.Background(), auth.CodexStoreKey, string(payload)); err != nil {
+		t.Fatalf("save codex record: %v", err)
+	}
+}
+
+func TestCodexAuth_StatusReportsAuthenticated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, _ := testManager(t)
+	writeCodexRecord(t, as, "acc-abc")
+
+	statuses, err := mgr.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	var got bool
+	for _, s := range statuses {
+		if s.Name == ProviderOpenAI {
+			got = s.Authenticated
+		}
+	}
+	if !got {
+		t.Fatal("openai should report authenticated when only a codex record is present")
+	}
+}
+
+func TestCodexAuth_LoadProviderRoutesToChatGPTEndpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// The test server must receive a request to
+	// /backend-api/codex/responses — with the codex headers set —
+	// proving buildProvider wired BaseURL / Endpoint / ExtraHeaders
+	// correctly for a codex-authed user.
+	var seen struct {
+		path    string
+		account string
+		origin  string
+		auth    string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.path = r.URL.Path
+		seen.account = r.Header.Get("ChatGPT-Account-Id")
+		seen.origin = r.Header.Get("originator")
+		seen.auth = r.Header.Get("Authorization")
+		// Minimal SSE to satisfy the /responses reader.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+	writeCodexRecord(t, as, "acc-xyz")
+
+	p, err := mgr.LoadProvider(ctx, ProviderOpenAI, "gpt-5-codex")
+	if err != nil {
+		t.Fatalf("LoadProvider: %v", err)
+	}
+	// LoadProvider defaults to /chat/completions; for codex routing we
+	// need the /responses endpoint — LoadProviderForModel carries that.
+	p, err = mgr.LoadProviderForModel(ctx, ModelInfo{
+		Provider: ProviderOpenAI,
+		Model:    "gpt-5-codex",
+		Endpoint: provider.EndpointResponses,
+	})
+	if err != nil {
+		t.Fatalf("LoadProviderForModel: %v", err)
+	}
+
+	events, err := p.Complete(ctx, provider.Request{
+		Model:    "gpt-5-codex",
+		Stream:   true,
+		Messages: nil,
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	for range events {
+		// Drain.
+	}
+
+	if !strings.HasSuffix(seen.path, "/backend-api/codex/responses") {
+		t.Errorf("server saw path %q, want suffix /backend-api/codex/responses", seen.path)
+	}
+	if seen.account != "acc-xyz" {
+		t.Errorf("ChatGPT-Account-Id = %q, want acc-xyz", seen.account)
+	}
+	if seen.origin != "stackllm" {
+		t.Errorf("originator = %q, want stackllm", seen.origin)
+	}
+	if seen.auth != "Bearer codex-access" {
+		t.Errorf("Authorization = %q, want Bearer codex-access", seen.auth)
+	}
+}
+
+func TestCodexAuth_ListModelsReturnsAllowlist(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// If the implementation ever regresses to hitting the upstream
+	// /models endpoint for a codex-only user, this server will record
+	// it — and we fail loudly.
+	var upstreamHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		http.Error(w, "/models is not exposed on codex", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+	writeCodexRecord(t, as, "acc-ok")
+
+	models, err := mgr.ListProviderModels(ctx, ProviderOpenAI)
+	if err != nil {
+		t.Fatalf("ListProviderModels: %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("expected hardcoded codex model allowlist, got empty list")
+	}
+	if upstreamHit {
+		t.Error("codex model listing should not call upstream /models")
+	}
+	// Sanity: allowlist must include a commonly-used codex model.
+	var foundCodex bool
+	for _, m := range models {
+		if m.Model == "gpt-5-codex" {
+			foundCodex = true
+		}
+		if m.Endpoint != provider.EndpointResponses {
+			t.Errorf("model %s Endpoint = %q, want %q", m.Model, m.Endpoint, provider.EndpointResponses)
+		}
+	}
+	if !foundCodex {
+		t.Error("codex allowlist missing gpt-5-codex")
+	}
+}
+
+func TestCodexAuth_LogoutClearsRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, _ := testManager(t)
+	writeCodexRecord(t, as, "acc-logout")
+
+	if err := mgr.Logout(ctx, ProviderOpenAI); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := auth.LoadCodexRecord(ctx, as); err == nil {
+		t.Error("expected codex record to be cleared after Logout")
+	}
+}
+
+func TestCodexAuth_APIKeyTakesPrecedenceOverCodex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// If a user has both an API key and a codex record, the API-key
+	// path wins — it targets api.openai.com, which is richer, and
+	// respects whatever endpoint the model requires.
+	srv := modelsServer(t, "gpt-5.4")
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+
+	if err := as.Save(ctx, keyOpenAI, "sk-direct-key"); err != nil {
+		t.Fatalf("save key: %v", err)
+	}
+	writeCodexRecord(t, as, "acc-shadowed")
+
+	// ListModels hits the API-key path; if it fell through to the
+	// codex allowlist the test server wouldn't be hit at all.
+	models, err := mgr.ListModels(ctx, ProviderOpenAI)
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 1 || models[0] != "gpt-5.4" {
+		t.Errorf("ListModels = %v, want [gpt-5.4] (from API-key path)", models)
 	}
 }
