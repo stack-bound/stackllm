@@ -152,6 +152,75 @@ func TestCodexDeviceSource_FullFlow(t *testing.T) {
 	}
 }
 
+// TestCodexDeviceSource_StringEncodedNumbers reproduces a real-world
+// response the codex endpoint ships: `interval` and `expires_in` come
+// back as JSON strings rather than numbers. The decoder must accept
+// both forms.
+func TestCodexDeviceSource_StringEncodedNumbers(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore()
+	idTok := codexFakeIDToken(t, map[string]any{"chatgpt_account_id": "acc-xyz"})
+	var polls atomic.Int32
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://test.codex.local/usercode":
+			return jsonResponse(map[string]any{
+				"device_auth_id": "dev-abc",
+				"user_code":      "AAAA-1111",
+				"interval":       "0",
+				"expires_in":     "60",
+			}), nil
+		case "https://test.codex.local/poll":
+			if polls.Add(1) == 1 {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader("")),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return jsonResponse(map[string]any{
+				"authorization_code": "auth-code",
+				"code_verifier":      "verifier",
+			}), nil
+		case "https://test.codex.local/token":
+			return jsonResponse(map[string]any{
+				"access_token":  "codex-access",
+				"refresh_token": "codex-refresh",
+				"id_token":      idTok,
+				"expires_in":    "3600",
+			}), nil
+		default:
+			t.Fatalf("unexpected URL: %s", req.URL.String())
+			return nil, nil
+		}
+	})}
+
+	src := NewCodexDeviceSource(CodexDeviceConfig{
+		Store:         store,
+		PollInterval:  time.Millisecond,
+		HTTPClient:    client,
+		DeviceCodeURL: "https://test.codex.local/usercode",
+		DevicePollURL: "https://test.codex.local/poll",
+		TokenURL:      "https://test.codex.local/token",
+		VerifyURL:     "https://test.codex.local/codex/device",
+		RedirectURI:   "https://test.codex.local/deviceauth/callback",
+	})
+
+	if err := src.Login(context.Background()); err != nil {
+		t.Fatalf("Login with string-encoded numbers: %v", err)
+	}
+
+	rec, err := LoadCodexRecord(context.Background(), store)
+	if err != nil {
+		t.Fatalf("LoadCodexRecord: %v", err)
+	}
+	if rec.ExpiresAt.IsZero() || rec.ExpiresAt.Before(time.Now()) {
+		t.Errorf("ExpiresAt = %v — string-form expires_in should have been honoured", rec.ExpiresAt)
+	}
+}
+
 func TestCodexDeviceSource_RefreshesExpiredToken(t *testing.T) {
 	t.Parallel()
 

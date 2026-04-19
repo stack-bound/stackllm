@@ -30,10 +30,44 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// flexInt accepts a JSON number or a JSON string that contains a
+// number. OpenAI's codex device-auth endpoint returns `interval` and
+// `expires_in` as strings in production even though the underlying
+// OAuth Device Authorization spec (RFC 8628) defines them as numbers.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		if s == "" {
+			return nil
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("flexInt: %q: %w", s, err)
+		}
+		*f = flexInt(n)
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*f = flexInt(n)
+	return nil
+}
 
 // CodexDefaultClientID is the OAuth client ID that OpenAI publishes
 // for their Codex CLI. It is intentionally hardcoded so embedders do
@@ -107,12 +141,12 @@ func saveCodexRecord(ctx context.Context, store TokenStore, rec CodexTokenRecord
 
 // codexTokenResponse is the shape returned by the /oauth/token exchange.
 type codexTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
+	AccessToken  string  `json:"access_token"`
+	RefreshToken string  `json:"refresh_token"`
+	IDToken      string  `json:"id_token"`
+	ExpiresIn    flexInt `json:"expires_in"`
+	Error        string  `json:"error"`
+	ErrorDesc    string  `json:"error_description"`
 }
 
 func (r codexTokenResponse) toRecord() CodexTokenRecord {
@@ -369,10 +403,10 @@ func (s *CodexDeviceSource) Login(ctx context.Context) error {
 	}
 
 	var usercode struct {
-		DeviceAuthID string `json:"device_auth_id"`
-		UserCode     string `json:"user_code"`
-		Interval     int    `json:"interval"`
-		ExpiresIn    int    `json:"expires_in"`
+		DeviceAuthID string  `json:"device_auth_id"`
+		UserCode     string  `json:"user_code"`
+		Interval     flexInt `json:"interval"`
+		ExpiresIn    flexInt `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &usercode); err != nil {
 		return fmt.Errorf("auth: codex: decode usercode: %w", err)
