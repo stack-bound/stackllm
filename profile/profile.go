@@ -721,6 +721,14 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model, endpoi
 		cfg.BaseURL = auth.CodexProviderBaseURL
 		// Codex-flow tokens are only accepted on /responses.
 		cfg.Endpoint = provider.EndpointResponses
+		// The Codex endpoint rejects requests without body.instructions
+		// ("Instructions are required"). Provide a neutral default so
+		// embedders that don't set their own system prompt still work.
+		cfg.Instructions = auth.CodexDefaultInstructions
+		// The Codex endpoint also rejects body.store=true ("Store must
+		// be set to false"); OAuth tokens are never allowed to
+		// persist server-side state on this path.
+		cfg.DisableStore = true
 		cfg.ExtraHeaders = map[string]string{
 			auth.CodexOriginatorHeader: "stackllm",
 		}

@@ -1396,16 +1396,24 @@ func TestCodexAuth_LoadProviderRoutesToChatGPTEndpoint(t *testing.T) {
 	// proving buildProvider wired BaseURL / Endpoint / ExtraHeaders
 	// correctly for a codex-authed user.
 	var seen struct {
-		path    string
-		account string
-		origin  string
-		auth    string
+		path         string
+		account      string
+		origin       string
+		auth         string
+		instructions string
+		store        any
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.path = r.URL.Path
 		seen.account = r.Header.Get("ChatGPT-Account-Id")
 		seen.origin = r.Header.Get("originator")
 		seen.auth = r.Header.Get("Authorization")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s, ok := body["instructions"].(string); ok {
+			seen.instructions = s
+		}
+		seen.store = body["store"]
 		// Minimal SSE to satisfy the /responses reader.
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -1454,6 +1462,12 @@ func TestCodexAuth_LoadProviderRoutesToChatGPTEndpoint(t *testing.T) {
 	}
 	if seen.auth != "Bearer codex-access" {
 		t.Errorf("Authorization = %q, want Bearer codex-access", seen.auth)
+	}
+	if seen.instructions == "" {
+		t.Error("body.instructions is empty; Codex endpoint rejects requests without it")
+	}
+	if got, ok := seen.store.(bool); !ok || got {
+		t.Errorf("body.store = %v (%T), want false; Codex endpoint rejects store=true", seen.store, seen.store)
 	}
 }
 

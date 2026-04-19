@@ -66,6 +66,14 @@ func (p *OpenAIProvider) buildResponsesBody(req Request) (map[string]any, error)
 		body["model"] = p.cfg.Model
 	}
 
+	if p.cfg.Instructions != "" {
+		body["instructions"] = p.cfg.Instructions
+	}
+
+	if p.cfg.DisableStore {
+		body["store"] = false
+	}
+
 	if req.MaxTokens > 0 {
 		body["max_output_tokens"] = req.MaxTokens
 	}

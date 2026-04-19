@@ -390,6 +390,133 @@ func TestOpenAIProvider_CompleteResponses_ToolFormat(t *testing.T) {
 	}
 }
 
+// TestOpenAIProvider_CompleteResponses_DisableStore verifies that
+// Config.DisableStore forces body["store"] = false on /responses
+// calls, and omits the field otherwise. The ChatGPT Codex endpoint
+// rejects requests that default to store=true with "Store must be
+// set to false".
+func TestOpenAIProvider_CompleteResponses_DisableStore(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		disable    bool
+		wantStore  bool // whether the field should appear in the body
+		wantValue  bool // expected value when present
+	}{
+		{"disabled", true, true, false},
+		{"default omits store", false, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedBody []byte
+			p := New(Config{
+				BaseURL:      "http://provider.test",
+				TokenSource:  auth.NewStatic("k"),
+				Model:        "gpt-5.4-mini",
+				Endpoint:     EndpointResponses,
+				DisableStore: tt.disable,
+				HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+					capturedBody, _ = io.ReadAll(req.Body)
+					return textResponse(http.StatusOK, "text/event-stream", responsesSSEText), nil
+				}),
+				MaxRetries: 1,
+			})
+
+			events, err := p.Complete(context.Background(), Request{
+				Messages: []conversation.Message{userText("Hi")},
+				Stream:   true,
+			})
+			if err != nil {
+				t.Fatalf("Complete error: %v", err)
+			}
+			for range events {
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(capturedBody, &body); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := body["store"]
+			if tt.wantStore {
+				if !present {
+					t.Fatal("body missing store field")
+				}
+				if got != tt.wantValue {
+					t.Errorf("store = %v, want %v", got, tt.wantValue)
+				}
+			} else if present {
+				t.Errorf("store field present unexpectedly: %v", got)
+			}
+		})
+	}
+}
+
+// TestOpenAIProvider_CompleteResponses_Instructions verifies that a
+// non-empty Config.Instructions is serialised into the top-level
+// body["instructions"] on /responses calls. This is required by the
+// ChatGPT Codex endpoint (chatgpt.com/backend-api/codex/responses)
+// which rejects requests without it.
+func TestOpenAIProvider_CompleteResponses_Instructions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		instructions string
+		wantPresent  bool
+	}{
+		{"set", "You are a helpful assistant.", true},
+		{"empty omitted", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedBody []byte
+			p := New(Config{
+				BaseURL:      "http://provider.test",
+				TokenSource:  auth.NewStatic("k"),
+				Model:        "gpt-5.4-mini",
+				Endpoint:     EndpointResponses,
+				Instructions: tt.instructions,
+				HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+					capturedBody, _ = io.ReadAll(req.Body)
+					return textResponse(http.StatusOK, "text/event-stream", responsesSSEText), nil
+				}),
+				MaxRetries: 1,
+			})
+
+			events, err := p.Complete(context.Background(), Request{
+				Messages: []conversation.Message{userText("Hi")},
+				Stream:   true,
+			})
+			if err != nil {
+				t.Fatalf("Complete error: %v", err)
+			}
+			for range events {
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(capturedBody, &body); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, present := body["instructions"]
+			if tt.wantPresent {
+				if !present {
+					t.Fatal("body missing instructions field")
+				}
+				if got != tt.instructions {
+					t.Errorf("instructions = %v, want %q", got, tt.instructions)
+				}
+			} else if present {
+				t.Errorf("instructions field present unexpectedly: %v", got)
+			}
+		})
+	}
+}
+
 func TestOpenAIProvider_EndpointDispatch(t *testing.T) {
 	t.Parallel()
 

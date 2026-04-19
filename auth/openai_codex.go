@@ -837,5 +837,12 @@ const CodexAccountHeader = "ChatGPT-Account-Id"
 // the server side.
 const CodexOriginatorHeader = "originator"
 
+// CodexDefaultInstructions is the fallback value used for the
+// Responses API body["instructions"] field on the codex endpoint when
+// the embedder has not set their own system prompt. The endpoint
+// validates that this field is present and non-empty and rejects
+// requests missing it with "Instructions are required".
+const CodexDefaultInstructions = "You are a helpful assistant."
+
 // PKCE helpers generateCodeVerifier / generateCodeChallenge live in
 // openai_web.go — they are shared between the two OAuth flows.

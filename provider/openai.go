@@ -31,6 +31,23 @@ type Config struct {
 	// EndpointResponses ("/responses") → OpenAI Responses API. Used for
 	// Copilot models that are not accessible via /chat/completions.
 	Endpoint string
+
+	// Instructions is the default top-level system prompt sent on every
+	// Responses API call (body["instructions"]). Ignored by
+	// /chat/completions. The ChatGPT Codex endpoint
+	// (chatgpt.com/backend-api/codex/responses) rejects requests that
+	// omit this field with "Instructions are required"; other
+	// /responses backends treat it as an optional system prompt.
+	Instructions string
+
+	// DisableStore, when true, emits body["store"] = false on every
+	// Responses API call. Ignored by /chat/completions. The ChatGPT
+	// Codex endpoint requires store=false for OAuth tokens and
+	// rejects requests that default to the server-side store with
+	// "Store must be set to false"; the standard OpenAI /v1/responses
+	// endpoint accepts either value, with true (the server default)
+	// persisting state across calls.
+	DisableStore bool
 }
 
 // OpenAIConfig returns config for the OpenAI API.
