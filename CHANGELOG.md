@@ -2,6 +2,10 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.4.1] - 2026-04-19
+### Added
+- Added pagination for sessions
+
 ## [0.4.0] - 2026-04-19
 ### Added
 - Added endpoint for logging in with all providers
