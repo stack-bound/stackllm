@@ -48,8 +48,8 @@ type CopilotConfig struct {
 	HTTPClient *http.Client
 
 	// Optional endpoint overrides for testing.
-	DeviceCodeURL  string
-	AccessTokenURL string
+	DeviceCodeURL   string
+	AccessTokenURL  string
 	CopilotTokenURL string
 }
 

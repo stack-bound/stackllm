@@ -36,11 +36,11 @@ type Event struct {
 	Type       EventType
 	BlockType  conversation.BlockType
 	Block      *conversation.Block
-	Content    string                  // set for EventToken and EventBlockDelta
-	ToolCall   *conversation.ToolCall  // set for EventToolCall
-	ToolResult string                  // set for EventToolResult
+	Content    string                   // set for EventToken and EventBlockDelta
+	ToolCall   *conversation.ToolCall   // set for EventToolCall
+	ToolResult string                   // set for EventToolResult
 	Usage      *conversation.TokenUsage // set for EventUsage
-	Err        error                   // set for EventError
-	Step       int                     // current step number
-	Messages   []conversation.Message  // set for EventComplete and EventError
+	Err        error                    // set for EventError
+	Step       int                      // current step number
+	Messages   []conversation.Message   // set for EventComplete and EventError
 }

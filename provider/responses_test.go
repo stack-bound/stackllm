@@ -399,10 +399,10 @@ func TestOpenAIProvider_CompleteResponses_DisableStore(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		disable    bool
-		wantStore  bool // whether the field should appear in the body
-		wantValue  bool // expected value when present
+		name      string
+		disable   bool
+		wantStore bool // whether the field should appear in the body
+		wantValue bool // expected value when present
 	}{
 		{"disabled", true, true, false},
 		{"default omits store", false, false, false},

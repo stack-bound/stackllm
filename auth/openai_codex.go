@@ -553,8 +553,8 @@ type CodexWebFlowConfig struct {
 
 	HTTPClient *http.Client
 
-	AuthURL   string // override for testing
-	TokenURL  string // override for testing
+	AuthURL  string // override for testing
+	TokenURL string // override for testing
 }
 
 func (c *CodexWebFlowConfig) clientID() string {
@@ -704,7 +704,17 @@ func (s *CodexWebFlowSource) Login(ctx context.Context) error {
 	go func() {
 		_ = server.Serve(listener)
 	}()
-	defer server.Close()
+	// The callback handler signals codeCh/errCh before its response is
+	// flushed, so Login can return while the browser's response is
+	// still in flight. Shutdown (bounded) drains it; Close would reset
+	// the connection and the user would never see the result page.
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			server.Close()
+		}
+	}()
 
 	if s.cfg.OnOpenURL != nil {
 		s.cfg.OnOpenURL(authURL)

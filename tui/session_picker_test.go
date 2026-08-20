@@ -333,8 +333,8 @@ func TestWindowBounds(t *testing.T) {
 		cursor, total, visible int
 		wantStart, wantEnd     int
 	}{
-		{0, 5, 10, 0, 5},    // fits, no scroll
-		{0, 20, 10, 0, 10},  // cursor at top
+		{0, 5, 10, 0, 5},     // fits, no scroll
+		{0, 20, 10, 0, 10},   // cursor at top
 		{19, 20, 10, 10, 20}, // cursor at bottom
 		{10, 20, 10, 5, 15},  // cursor in middle
 	}

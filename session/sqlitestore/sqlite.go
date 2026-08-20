@@ -1957,7 +1957,7 @@ func (s *Store) ImportJSONL(ctx context.Context, r io.Reader) (string, error) {
 		lastNew = newMsgID
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE stackllm_sessions SET current_leaf_id = ? WHERE id = ?`, lastNew, newID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE stackllm_sessions SET current_leaf_id = ? WHERE id = ?`, nullString(lastNew), newID); err != nil {
 		return "", fmt.Errorf("sqlitestore: Import: set leaf: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

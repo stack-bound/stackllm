@@ -141,12 +141,12 @@ func (s *OpenAIWebFlowSource) Login(ctx context.Context) error {
 	// Build authorization URL.
 	params := url.Values{
 		"client_id":             {s.cfg.ClientID},
-		"response_type":        {"code"},
-		"redirect_uri":         {redirectURI},
-		"scope":                {"openid profile email offline_access"},
-		"audience":             {"https://api.openai.com/v1"},
-		"state":                {state},
-		"code_challenge":       {challenge},
+		"response_type":         {"code"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile email offline_access"},
+		"audience":              {"https://api.openai.com/v1"},
+		"state":                 {state},
+		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 	}
 	authURL := s.cfg.authURL() + "?" + params.Encode()
@@ -189,7 +189,17 @@ func (s *OpenAIWebFlowSource) Login(ctx context.Context) error {
 			errCh <- fmt.Errorf("auth: openai web server: %w", err)
 		}
 	}()
-	defer server.Close()
+	// The callback handler signals codeCh/errCh before its response is
+	// flushed, so Login can return while the browser's response is
+	// still in flight. Shutdown (bounded) drains it; Close would reset
+	// the connection and the user would never see the result page.
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			server.Close()
+		}
+	}()
 
 	// Tell the user to open the URL.
 	if s.cfg.OnOpenURL != nil {
@@ -237,14 +247,14 @@ func (s *OpenAIWebFlowSource) Begin(_ context.Context, redirectURI string) (stri
 	state := base64.RawURLEncoding.EncodeToString(stateBytes)
 
 	params := url.Values{
-		"client_id":              {s.cfg.ClientID},
-		"response_type":          {"code"},
-		"redirect_uri":           {redirectURI},
-		"scope":                  {"openid profile email offline_access"},
-		"audience":               {"https://api.openai.com/v1"},
-		"state":                  {state},
-		"code_challenge":         {challenge},
-		"code_challenge_method":  {"S256"},
+		"client_id":             {s.cfg.ClientID},
+		"response_type":         {"code"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {"openid profile email offline_access"},
+		"audience":              {"https://api.openai.com/v1"},
+		"state":                 {state},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
 	}
 
 	s.mu.Lock()

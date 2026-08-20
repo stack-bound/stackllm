@@ -107,19 +107,19 @@ func (p *OpenAIProvider) buildResponsesBody(req Request) (map[string]any, error)
 //
 // Mapping:
 //   - system BlockText           → {"type":"message","role":"developer",
-//                                    "content":[{"type":"input_text","text":...}]}
+//     "content":[{"type":"input_text","text":...}]}
 //   - user BlockText             → {"type":"message","role":"user",
-//                                    "content":[{"type":"input_text","text":...}]}
+//     "content":[{"type":"input_text","text":...}]}
 //   - user BlockImage            → {"type":"message","role":"user",
-//                                    "content":[{"type":"input_image","image_url":...}]}
+//     "content":[{"type":"input_image","image_url":...}]}
 //   - assistant BlockText        → {"type":"message","role":"assistant",
-//                                    "content":[{"type":"output_text","text":...}]}
+//     "content":[{"type":"output_text","text":...}]}
 //   - assistant BlockThinking    → {"type":"reasoning",
-//                                    "summary":[{"type":"summary_text","text":...}]}
+//     "summary":[{"type":"summary_text","text":...}]}
 //   - assistant BlockToolUse     → {"type":"function_call","call_id":...,
-//                                    "name":...,"arguments":...}
+//     "name":...,"arguments":...}
 //   - tool BlockToolResult       → {"type":"function_call_output","call_id":...,
-//                                    "output":...}
+//     "output":...}
 func messagesToInput(msgs []conversation.Message) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
@@ -235,12 +235,12 @@ func messagesToInput(msgs []conversation.Message) ([]map[string]any, error) {
 // items in the order response.output_item.done fires, preserving the
 // natural production order of interleaved reasoning/text/tool_use.
 type responsesItemAcc struct {
-	kind        string // "reasoning" | "message" | "function_call"
-	blockType   conversation.BlockType
-	text        strings.Builder
-	callID      string
-	name        string
-	arguments   strings.Builder
+	kind         string // "reasoning" | "message" | "function_call"
+	blockType    conversation.BlockType
+	text         strings.Builder
+	callID       string
+	name         string
+	arguments    strings.Builder
 	blockStarted bool
 }
 

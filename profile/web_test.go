@@ -250,12 +250,12 @@ func TestBeginOpenAIDeviceLogin_MirrorsTokenIntoKeySlot(t *testing.T) {
 	mux.HandleFunc("/oauth/device/code", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"device_code":              "oai-dev",
-			"user_code":                "OAI-WEB-9",
-			"verification_uri":         "https://auth0.openai.com/activate",
+			"device_code":               "oai-dev",
+			"user_code":                 "OAI-WEB-9",
+			"verification_uri":          "https://auth0.openai.com/activate",
 			"verification_uri_complete": "https://auth0.openai.com/activate?user_code=OAI-WEB-9",
-			"interval":                 0,
-			"expires_in":               60,
+			"interval":                  0,
+			"expires_in":                60,
 		})
 	})
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
@@ -263,9 +263,9 @@ func TestBeginOpenAIDeviceLogin_MirrorsTokenIntoKeySlot(t *testing.T) {
 		select {
 		case <-authorise:
 			json.NewEncoder(w).Encode(map[string]any{
-				"access_token": "oai-access-token",
+				"access_token":  "oai-access-token",
 				"refresh_token": "oai-refresh",
-				"expires_in":   3600,
+				"expires_in":    3600,
 			})
 		default:
 			json.NewEncoder(w).Encode(map[string]any{"error": "authorization_pending"})

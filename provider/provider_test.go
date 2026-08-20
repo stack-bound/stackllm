@@ -103,8 +103,10 @@ data: [DONE]
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("key"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	events, err := p.Complete(context.Background(), Request{
@@ -170,8 +172,10 @@ data: [DONE]
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("k"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	events, err := p.Complete(context.Background(), Request{
@@ -241,8 +245,10 @@ data: [DONE]
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("key"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	events, err := p.Complete(context.Background(), Request{
@@ -312,8 +318,10 @@ data: [DONE]
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("key"),
 		Model:       "gemini-3.1-pro-preview",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", sseData), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	events, err := p.Complete(context.Background(), Request{
@@ -349,8 +357,10 @@ func TestOpenAIProvider_BuildRequestBody_DropsThinkingAndFlattens(t *testing.T) 
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("k"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	// Assistant with interleaved thinking + text + tool_use. Chat
@@ -416,8 +426,10 @@ func TestOpenAIProvider_BuildRequestBody_MultiPartImage(t *testing.T) {
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("k"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusOK, "text/event-stream", "data: [DONE]\n\n"), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	msgs := []conversation.Message{
@@ -510,8 +522,10 @@ func TestOpenAIProvider_ErrorResponse(t *testing.T) {
 		BaseURL:     "http://provider.test/v1",
 		TokenSource: auth.NewStatic("key"),
 		Model:       "gpt-4",
-		HTTPClient:  newTestClient(func(req *http.Request) (*http.Response, error) { return textResponse(http.StatusBadRequest, "application/json", `{"error":{"message":"bad request"}}`), nil }),
-		MaxRetries:  1,
+		HTTPClient: newTestClient(func(req *http.Request) (*http.Response, error) {
+			return textResponse(http.StatusBadRequest, "application/json", `{"error":{"message":"bad request"}}`), nil
+		}),
+		MaxRetries: 1,
 	})
 
 	events, err := p.Complete(context.Background(), Request{
@@ -777,4 +791,3 @@ func ExampleOpenAIConfig() {
 	fmt.Println(cfg.BaseURL)
 	// Output: https://api.openai.com/v1
 }
-

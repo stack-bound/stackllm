@@ -10,23 +10,60 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
+var (
+	allocatedPortsMu sync.Mutex
+	allocatedPorts   = map[int]bool{}
+)
+
 // freePort grabs an ephemeral TCP port from the kernel and releases it
-// so a Login callback listener can bind it. There is a small window
-// where another process could steal the port, but in practice this is
-// reliable for tests.
+// so a Login callback listener can bind it. A port is never handed out
+// twice within this test binary: after freePort closes its probe
+// listener the kernel may immediately reuse the port for a concurrent
+// freePort call, and two parallel web-flow tests sharing a port
+// cross-talk through each other's /callback handlers (a foreign GET
+// carries the wrong state, which aborts the victim's Login). A stolen
+// port from outside the process remains possible but only fails the
+// bind, which awaitAuthURL surfaces fast.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
+	allocatedPortsMu.Lock()
+	defer allocatedPortsMu.Unlock()
+	for range 100 {
+		l, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("freePort: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		l.Close()
+		if !allocatedPorts[port] {
+			allocatedPorts[port] = true
+			return port
+		}
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
+	t.Fatal("freePort: no unused port after 100 attempts")
+	return 0
+}
+
+// awaitAuthURL waits for Login to publish its authorization URL,
+// failing fast if Login exits first (e.g. its callback port was taken
+// between freePort and the listener bind) instead of deadlocking on
+// the URL channel.
+func awaitAuthURL(t *testing.T, urlCh <-chan string, loginErr <-chan error) string {
+	t.Helper()
+	select {
+	case u := <-urlCh:
+		return u
+	case err := <-loginErr:
+		t.Fatalf("Login exited before publishing auth URL: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for auth URL")
+	}
+	return ""
 }
 
 func TestOpenAIWebFlowConfig_Port(t *testing.T) {
@@ -112,7 +149,7 @@ func TestOpenAIWebFlowSource_LoginEndToEnd(t *testing.T) {
 	loginErr := make(chan error, 1)
 	go func() { loginErr <- src.Login(context.Background()) }()
 
-	authURL := <-urlCh
+	authURL := awaitAuthURL(t, urlCh, loginErr)
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("parse authURL: %v", err)
@@ -224,7 +261,7 @@ func TestOpenAIWebFlowSource_LoginCallbackErrors(t *testing.T) {
 			loginErr := make(chan error, 1)
 			go func() { loginErr <- src.Login(context.Background()) }()
 
-			authURL := <-urlCh
+			authURL := awaitAuthURL(t, urlCh, loginErr)
 			parsed, err := url.Parse(authURL)
 			if err != nil {
 				t.Fatalf("parse authURL: %v", err)
@@ -327,7 +364,14 @@ func TestOpenAIWebFlowSource_TokenTriggersLogin(t *testing.T) {
 		resCh <- tokenResult{tok, err}
 	}()
 
-	authURL := <-urlCh
+	var authURL string
+	select {
+	case authURL = <-urlCh:
+	case res := <-resCh:
+		t.Fatalf("Token exited before publishing auth URL: %v", res.err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for auth URL")
+	}
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("parse authURL: %v", err)

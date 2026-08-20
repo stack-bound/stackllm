@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/x/cellbuf"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/cellbuf"
 
 	"github.com/stack-bound/stackllm/agent"
 	"github.com/stack-bound/stackllm/provider"

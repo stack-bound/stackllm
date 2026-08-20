@@ -193,10 +193,10 @@ func TestTokenBudget(t *testing.T) {
 		{
 			name: "drops oldest non-system first",
 			msgs: []Message{
-				mkMsg(RoleSystem, "sys"),           // 3 chars
-				mkMsg(RoleUser, "aaaaaaaaaa"),      // 10 chars
-				mkMsg(RoleAssistant, "bbbbb"),      // 5 chars
-				mkMsg(RoleUser, "cc"),              // 2 chars
+				mkMsg(RoleSystem, "sys"),      // 3 chars
+				mkMsg(RoleUser, "aaaaaaaaaa"), // 10 chars
+				mkMsg(RoleAssistant, "bbbbb"), // 5 chars
+				mkMsg(RoleUser, "cc"),         // 2 chars
 			},
 			maxTokens: 11, // need to drop "aaaaaaaaaa" (total would be 3+5+2=10)
 			wantLen:   3,

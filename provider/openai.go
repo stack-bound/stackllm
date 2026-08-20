@@ -87,8 +87,8 @@ func CopilotConfig(model string, ts auth.TokenSource) Config {
 		TokenSource: ts,
 		Model:       model,
 		ExtraHeaders: map[string]string{
-			"Editor-Version":       "vscode/1.85.0",
-			"Editor-Plugin-Version": "copilot-chat/0.12.0",
+			"Editor-Version":         "vscode/1.85.0",
+			"Editor-Plugin-Version":  "copilot-chat/0.12.0",
 			"Copilot-Integration-Id": "vscode-chat",
 		},
 		MaxRetries: 3,

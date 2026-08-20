@@ -146,3 +146,126 @@ func TestFileStore_DefaultPath(t *testing.T) {
 		t.Errorf("path should end with auth.json, got %q", p)
 	}
 }
+
+func TestFileStore_XDGConfigHomePath(t *testing.T) {
+	// No t.Parallel(): t.Setenv forbids it.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	store := &FileStore{AppName: "myapp"}
+	want := filepath.Join(dir, "myapp", "auth.json")
+	if got := store.path(); got != want {
+		t.Errorf("path() = %q, want %q", got, want)
+	}
+
+	// The store must actually read and write through that path.
+	ctx := context.Background()
+	if err := store.Save(ctx, "k", "v"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("expected auth file at XDG path %q: %v", want, err)
+	}
+	v, err := store.Load(ctx, "k")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if v != "v" {
+		t.Errorf("Load = %q, want %q", v, "v")
+	}
+}
+
+func TestFileStore_CorruptFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(p, []byte("not-json{"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	store := &FileStore{Path: p}
+
+	if _, err := store.Load(ctx, "k"); err == nil {
+		t.Error("Load should fail on a corrupt store file")
+	}
+	if err := store.Save(ctx, "k", "v"); err == nil {
+		t.Error("Save should fail on a corrupt store file rather than clobber it")
+	}
+	if err := store.Delete(ctx, "k"); err == nil {
+		t.Error("Delete should fail on a corrupt store file")
+	}
+
+	// The corrupt file must not have been overwritten by the failed ops.
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "not-json{" {
+		t.Errorf("corrupt file was modified: %q", data)
+	}
+}
+
+func TestFileStore_UncreatableDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — directory permissions are not enforced")
+	}
+
+	// The store file does not exist (so readAll succeeds with an empty
+	// map), but its parent directory cannot be created because the
+	// grandparent is read-only — writeAll's MkdirAll must fail.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	store := &FileStore{Path: filepath.Join(dir, "sub", "auth.json")}
+	if err := store.Save(ctx, "k", "v"); err == nil {
+		t.Error("Save should fail when the store directory cannot be created")
+	}
+}
+
+func TestFileStore_UnwritableDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — directory permissions are not enforced")
+	}
+
+	// Directory exists (MkdirAll succeeds) but is read-only, so the
+	// temp-file write must fail.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	store := &FileStore{Path: filepath.Join(dir, "auth.json")}
+	if err := store.Save(ctx, "k", "v"); err == nil {
+		t.Error("Save should fail when the store directory is not writable")
+	}
+}
+
+func TestFileStore_ReadErrorIsNotMaskedAsMissing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A path whose parent component is a regular file produces a read
+	// error that is NOT os.IsNotExist — it must surface, not be treated
+	// as an empty store.
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	store := &FileStore{Path: filepath.Join(blocker, "auth.json")}
+	if _, err := store.Load(ctx, "k"); err == nil {
+		t.Error("Load should surface a non-IsNotExist read error")
+	}
+}
