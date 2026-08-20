@@ -2,6 +2,10 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.5.2] - 2026-08-20 (93.81%)
+### Fixed
+- OpenAI/Azure chat completions now send max_completion_tokens (with automatic max_tokens fallback for older models), fixing 400 unsupported_parameter errors on newer models
+
 ## [0.5.1] - 2026-08-20 (93.81%)
 ### Changed
 - Improved test coverage from 71.56% to 93.81%
