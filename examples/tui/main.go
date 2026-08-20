@@ -27,7 +27,7 @@ import (
 	"github.com/stack-bound/stackllm/auth"
 	"github.com/stack-bound/stackllm/profile"
 	"github.com/stack-bound/stackllm/provider"
-	"github.com/stack-bound/stackllm/session"
+	"github.com/stack-bound/stackllm/session/sqlitestore"
 	"github.com/stack-bound/stackllm/tools"
 	"github.com/stack-bound/stackllm/tui"
 
@@ -60,7 +60,7 @@ func main() {
 
 	// TUI. Use a persistent SQLite-backed store so session history
 	// survives across runs and /sessions, /fork, /export all work.
-	store, err := session.OpenSQLiteStore(session.SQLiteConfig{AppName: "stackllm-tui-example"})
+	store, err := sqlitestore.Open(sqlitestore.Config{AppName: "stackllm-tui-example"})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening session store: %v\n", err)
 		os.Exit(1)

@@ -1,4 +1,4 @@
-package session
+package sqlitestore
 
 // latestSchemaVersion is the current version of the stackllm SQLite
 // schema. Opening a DB whose stored version exceeds this value is a

@@ -1,4 +1,4 @@
-package session
+package sqlitestore
 
 import (
 	"bytes"
@@ -7,30 +7,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stack-bound/stackllm/conversation"
+	"github.com/stack-bound/stackllm/session"
 
 	_ "modernc.org/sqlite"
 )
 
-// newFileStore opens a fresh SQLiteStore in a per-test temporary
+// newFileStore opens a fresh sqlitestore.Store in a per-test temporary
 // directory and registers Close on cleanup.
-func newFileStore(t *testing.T) *SQLiteStore {
+func newFileStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	store, err := OpenSQLiteStore(SQLiteConfig{Path: path})
+	store, err := Open(Config{Path: path})
 	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
 }
 
-// newSharedDB opens a *sql.DB the caller owns (for NewSQLiteStore
+// newSharedDB opens a *sql.DB the caller owns (for New
 // tests) and pins it to a single connection so the test can exercise
 // parent-app coexistence without pool races.
 func newSharedDB(t *testing.T) *sql.DB {
@@ -52,9 +54,9 @@ func newSharedDB(t *testing.T) *sql.DB {
 // Returned alongside the session is the full 200 KB payload used by
 // the tool_result offload test so dedup/artifact assertions can hash
 // against it directly.
-func makeInterleavedSession(t *testing.T) (*Session, string, []byte) {
+func makeInterleavedSession(t *testing.T) (*session.Session, string, []byte) {
 	t.Helper()
-	sess := New()
+	sess := session.New()
 	sess.Name = "roundtrip"
 	sess.ProjectPath = "/tmp/demo"
 	sess.Model = "gpt-4o"
@@ -130,13 +132,13 @@ func makeInterleavedSession(t *testing.T) (*Session, string, []byte) {
 // Path resolution.
 // ---------------------------------------------------------------------
 
-func TestSQLiteConfig_ResolvePath_AppName(t *testing.T) {
+func TestConfig_ResolvePath_AppName(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
 
-	store, err := OpenSQLiteStore(SQLiteConfig{AppName: "stackllm-test"})
+	store, err := Open(Config{AppName: "stackllm-test"})
 	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
 
@@ -146,9 +148,9 @@ func TestSQLiteConfig_ResolvePath_AppName(t *testing.T) {
 	}
 }
 
-func TestSQLiteConfig_ResolvePath_RequiresConfig(t *testing.T) {
+func TestConfig_ResolvePath_RequiresConfig(t *testing.T) {
 	t.Parallel()
-	_, err := OpenSQLiteStore(SQLiteConfig{})
+	_, err := Open(Config{})
 	if err == nil {
 		t.Fatal("expected error for empty config")
 	}
@@ -157,11 +159,11 @@ func TestSQLiteConfig_ResolvePath_RequiresConfig(t *testing.T) {
 	}
 }
 
-func TestSQLiteConfig_ResolvePath_PathWins(t *testing.T) {
+func TestConfig_ResolvePath_PathWins(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "explicit.db")
-	store, err := OpenSQLiteStore(SQLiteConfig{AppName: "ignored", Path: path})
+	store, err := Open(Config{AppName: "ignored", Path: path})
 	if err != nil {
-		t.Fatalf("OpenSQLiteStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close()
 	if _, err := os.Stat(path); err != nil {
@@ -173,7 +175,7 @@ func TestSQLiteConfig_ResolvePath_PathWins(t *testing.T) {
 // Parent-app sharing.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_ParentAppSharing(t *testing.T) {
+func TestStore_ParentAppSharing(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -185,13 +187,13 @@ func TestSQLiteStore_ParentAppSharing(t *testing.T) {
 		t.Fatalf("insert parent row: %v", err)
 	}
 
-	store, err := NewSQLiteStore(db)
+	store, err := New(db)
 	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	// Save a tiny stackllm session.
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
 		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hello"}},
@@ -218,7 +220,7 @@ func TestSQLiteStore_ParentAppSharing(t *testing.T) {
 		t.Errorf("loaded text = %q", got)
 	}
 
-	// Close is a no-op for NewSQLiteStore; the caller's DB stays open.
+	// Close is a no-op for New; the caller's DB stays open.
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestSQLiteStore_ParentAppSharing(t *testing.T) {
 // Save/Load full round-trip.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_SaveLoadRoundTrip(t *testing.T) {
+func TestStore_SaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
@@ -385,12 +387,12 @@ func TestSQLiteStore_SaveLoadRoundTrip(t *testing.T) {
 // Repeated Save is append-only.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_RepeatSaveIsAppendOnly(t *testing.T) {
+func TestStore_RepeatSaveIsAppendOnly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
 		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "first"}},
@@ -449,12 +451,12 @@ func TestSQLiteStore_RepeatSaveIsAppendOnly(t *testing.T) {
 // In-memory mutation is silently dropped.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_InMemoryMutationDropped(t *testing.T) {
+func TestStore_InMemoryMutationDropped(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
 		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "original"}},
@@ -483,12 +485,12 @@ func TestSQLiteStore_InMemoryMutationDropped(t *testing.T) {
 // Parent chain divergence is rejected.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_ParentChainDivergenceRejected(t *testing.T) {
+func TestStore_ParentChainDivergenceRejected(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	for i := 0; i < 3; i++ {
 		sess.AppendMessage(conversation.Message{
 			Role:   conversation.RoleUser,
@@ -531,7 +533,7 @@ func TestSQLiteStore_ParentChainDivergenceRejected(t *testing.T) {
 // Artifact dedupe across sessions.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_ArtifactDedupe(t *testing.T) {
+func TestStore_ArtifactDedupe(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
@@ -539,7 +541,7 @@ func TestSQLiteStore_ArtifactDedupe(t *testing.T) {
 	big := strings.Repeat("dedupe me\n", 20_000) // ~200 KB
 
 	for i := 0; i < 2; i++ {
-		sess := New()
+		sess := session.New()
 		sess.AppendMessage(conversation.Message{
 			Role:   conversation.RoleUser,
 			Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hi"}},
@@ -568,14 +570,14 @@ func TestSQLiteStore_ArtifactDedupe(t *testing.T) {
 // Fork.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_Fork(t *testing.T) {
+func TestStore_Fork(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
 	// Five messages, middle one carries an offloaded tool result so
 	// we can assert artifact reuse.
-	sess := New()
+	sess := session.New()
 	big := strings.Repeat("fork payload\n", 12_000)
 	for i := 0; i < 5; i++ {
 		if i == 2 {
@@ -647,12 +649,12 @@ func TestSQLiteStore_Fork(t *testing.T) {
 // Rewind creates a sibling branch.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_RewindAndListBranches(t *testing.T) {
+func TestStore_RewindAndListBranches(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	for i := 0; i < 5; i++ {
 		sess.AppendMessage(conversation.Message{
 			Role:   conversation.RoleUser,
@@ -733,12 +735,12 @@ func TestSQLiteStore_RewindAndListBranches(t *testing.T) {
 // FTS: block-type filter + preview-only indexing.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_Search_BlockTypeFilter(t *testing.T) {
+func TestStore_Search_BlockTypeFilter(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role: conversation.RoleAssistant,
 		Blocks: []conversation.Block{
@@ -772,7 +774,7 @@ func TestSQLiteStore_Search_BlockTypeFilter(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Search_PreviewOnlyForBigToolResults(t *testing.T) {
+func TestStore_Search_PreviewOnlyForBigToolResults(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
@@ -782,7 +784,7 @@ func TestSQLiteStore_Search_PreviewOnlyForBigToolResults(t *testing.T) {
 	tail := "STACKLLM_TAIL_TOKEN_QRS"
 	big := prefix + middle + tail
 
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role: conversation.RoleTool,
 		Blocks: []conversation.Block{
@@ -814,7 +816,7 @@ func TestSQLiteStore_Search_PreviewOnlyForBigToolResults(t *testing.T) {
 // JSONL export / import.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_JSONLRoundTrip(t *testing.T) {
+func TestStore_JSONLRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
@@ -888,19 +890,19 @@ func TestSQLiteStore_JSONLRoundTrip(t *testing.T) {
 // Concurrent readers (WAL).
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_ConcurrentReadersWAL(t *testing.T) {
+func TestStore_ConcurrentReadersWAL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	path := filepath.Join(t.TempDir(), "wal.db")
-	writer, err := OpenSQLiteStore(SQLiteConfig{Path: path})
+	writer, err := Open(Config{Path: path})
 	if err != nil {
 		t.Fatalf("writer open: %v", err)
 	}
 	defer writer.Close()
 
 	// Seed a single session the reader will repeatedly Load.
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
 		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "seed"}},
@@ -914,9 +916,9 @@ func TestSQLiteStore_ConcurrentReadersWAL(t *testing.T) {
 		t.Fatalf("reader sql.Open: %v", err)
 	}
 	defer readerDB.Close()
-	reader, err := NewSQLiteStore(readerDB)
+	reader, err := New(readerDB)
 	if err != nil {
-		t.Fatalf("reader NewSQLiteStore: %v", err)
+		t.Fatalf("reader New: %v", err)
 	}
 
 	var writerErr, readerErr atomic.Value
@@ -985,12 +987,12 @@ finished:
 // Schema version guard.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_SchemaVersionGuard(t *testing.T) {
+func TestStore_SchemaVersionGuard(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "future.db")
 
-	store, err := OpenSQLiteStore(SQLiteConfig{Path: path})
+	store, err := Open(Config{Path: path})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -1000,7 +1002,7 @@ func TestSQLiteStore_SchemaVersionGuard(t *testing.T) {
 	}
 	store.Close()
 
-	_, err = OpenSQLiteStore(SQLiteConfig{Path: path})
+	_, err = Open(Config{Path: path})
 	if err == nil {
 		t.Fatal("expected error reopening newer DB")
 	}
@@ -1013,13 +1015,13 @@ func TestSQLiteStore_SchemaVersionGuard(t *testing.T) {
 // Cycle detection.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_CycleDetection(t *testing.T) {
+func TestStore_CycleDetection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
 	// Create a 2-message session normally.
-	sess := New()
+	sess := session.New()
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
 		Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "m0"}},
@@ -1052,12 +1054,12 @@ func TestSQLiteStore_CycleDetection(t *testing.T) {
 // Cascade delete (artifacts remain — v1 known limitation).
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_DeleteCascades(t *testing.T) {
+func TestStore_DeleteCascades(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	big := strings.Repeat("cascade me\n", 10_000)
 	sess.AppendMessage(conversation.Message{
 		Role: conversation.RoleTool,
@@ -1120,7 +1122,7 @@ func TestSQLiteStore_DeleteCascades(t *testing.T) {
 // FTS5 availability guard.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_FTS5AvailabilityProbe(t *testing.T) {
+func TestStore_FTS5AvailabilityProbe(t *testing.T) {
 	t.Parallel()
 	// Positive case: a freshly-opened modernc store must pass the
 	// FTS5 probe. This is the guard that fires in production if a
@@ -1131,14 +1133,14 @@ func TestSQLiteStore_FTS5AvailabilityProbe(t *testing.T) {
 	}
 }
 
-// TestSQLiteStore_FTS5Missing_BootstrapFails simulates a SQLite build
+// TestStore_FTS5Missing_BootstrapFails simulates a SQLite build
 // that does not define ENABLE_FTS5 by swapping in a stub probe, and
-// asserts that NewSQLiteStore refuses to bootstrap — the whole point
+// asserts that New refuses to bootstrap — the whole point
 // of the guard is to fail fast with a clear message before any
 // stackllm_* table is created.
 //
 // Not parallel: mutates the package-level probeCompileOptions hook.
-func TestSQLiteStore_FTS5Missing_BootstrapFails(t *testing.T) {
+func TestStore_FTS5Missing_BootstrapFails(t *testing.T) {
 	orig := probeCompileOptions
 	t.Cleanup(func() { probeCompileOptions = orig })
 
@@ -1147,7 +1149,7 @@ func TestSQLiteStore_FTS5Missing_BootstrapFails(t *testing.T) {
 		// check traverses the "rows iterated fine, flag absent"
 		// code path rather than getting a spurious empty result.
 		return map[string]struct{}{
-			"THREADSAFE=1":        {},
+			"THREADSAFE=1":          {},
 			"ENABLE_MATH_FUNCTIONS": {},
 		}, nil
 	}
@@ -1159,9 +1161,9 @@ func TestSQLiteStore_FTS5Missing_BootstrapFails(t *testing.T) {
 	}
 	defer db.Close()
 
-	_, err = NewSQLiteStore(db)
+	_, err = New(db)
 	if err == nil {
-		t.Fatal("NewSQLiteStore succeeded; expected ENABLE_FTS5 guard to fire")
+		t.Fatal("New succeeded; expected ENABLE_FTS5 guard to fire")
 	}
 	if !strings.Contains(err.Error(), "ENABLE_FTS5") {
 		t.Errorf("error = %q, want mention of ENABLE_FTS5", err)
@@ -1185,19 +1187,19 @@ func TestSQLiteStore_FTS5Missing_BootstrapFails(t *testing.T) {
 // List ordering sanity.
 // ---------------------------------------------------------------------
 
-func TestSQLiteStore_ListOrderedByUpdated(t *testing.T) {
+func TestStore_ListOrderedByUpdated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	s1 := New()
+	s1 := session.New()
 	s1.AppendMessage(conversation.Message{Role: conversation.RoleUser, Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "a"}}})
 	if err := store.Save(ctx, s1); err != nil {
 		t.Fatalf("save s1: %v", err)
 	}
 	time.Sleep(5 * time.Millisecond)
 
-	s2 := New()
+	s2 := session.New()
 	s2.AppendMessage(conversation.Message{Role: conversation.RoleUser, Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "b"}}})
 	if err := store.Save(ctx, s2); err != nil {
 		t.Fatalf("save s2: %v", err)
@@ -1264,16 +1266,16 @@ func TestSHA256Hex_Stable(t *testing.T) {
 // Regression: state_json must persist across subsequent saves.
 // ---------------------------------------------------------------------
 
-// TestSQLiteStore_SaveUpdatesStateJSON pins the contract that SetState
+// TestStore_SaveUpdatesStateJSON pins the contract that SetState
 // mutations persist on every save, not only on the initial insert.
 // Regression: the UPDATE path in Save used to omit state_json, so any
 // state written after the first save silently round-tripped as stale.
-func TestSQLiteStore_SaveUpdatesStateJSON(t *testing.T) {
+func TestStore_SaveUpdatesStateJSON(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.SetState("mode", "initial")
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
@@ -1325,12 +1327,12 @@ func TestSQLiteStore_SaveUpdatesStateJSON(t *testing.T) {
 	}
 }
 
-// TestSQLiteStore_NewSQLiteStore_AppliesWALAtBootstrap pins the
-// contract that NewSQLiteStore flips a caller-owned file DB into WAL
+// TestStore_New_AppliesWALAtBootstrap pins the
+// contract that New flips a caller-owned file DB into WAL
 // mode at bootstrap, even when the caller's DSN did not request it.
 // WAL is file-level and persists across connections, so one PRAGMA at
 // bootstrap is enough for the whole pool.
-func TestSQLiteStore_NewSQLiteStore_AppliesWALAtBootstrap(t *testing.T) {
+func TestStore_New_AppliesWALAtBootstrap(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "caller-owned.db")
@@ -1350,11 +1352,11 @@ func TestSQLiteStore_NewSQLiteStore_AppliesWALAtBootstrap(t *testing.T) {
 		t.Fatalf("pragma journal_mode (before): %v", err)
 	}
 	if before == "wal" {
-		t.Fatalf("file DB already in wal before NewSQLiteStore — test would be vacuous")
+		t.Fatalf("file DB already in wal before New — test would be vacuous")
 	}
 
-	if _, err := NewSQLiteStore(db); err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
+	if _, err := New(db); err != nil {
+		t.Fatalf("New: %v", err)
 	}
 
 	var after string
@@ -1362,16 +1364,16 @@ func TestSQLiteStore_NewSQLiteStore_AppliesWALAtBootstrap(t *testing.T) {
 		t.Fatalf("pragma journal_mode (after): %v", err)
 	}
 	if after != "wal" {
-		t.Errorf("journal_mode after NewSQLiteStore = %q, want wal", after)
+		t.Errorf("journal_mode after New = %q, want wal", after)
 	}
 }
 
-// TestSQLiteStore_Begin_AppliesPerTxPragmas verifies that every
+// TestStore_Begin_AppliesPerTxPragmas verifies that every
 // transaction opened by the store applies foreign_keys and
 // busy_timeout to its checked-out connection. synchronous cannot be
-// set inside a transaction (SQLite rejects it), so NewSQLiteStore
-// explicitly leaves it to the caller's DSN — see NewSQLiteStore doc.
-func TestSQLiteStore_Begin_AppliesPerTxPragmas(t *testing.T) {
+// set inside a transaction (SQLite rejects it), so New
+// explicitly leaves it to the caller's DSN — see New doc.
+func TestStore_Begin_AppliesPerTxPragmas(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "pragma-check.db")
@@ -1387,9 +1389,9 @@ func TestSQLiteStore_Begin_AppliesPerTxPragmas(t *testing.T) {
 	// connection the transaction used.
 	db.SetMaxOpenConns(1)
 
-	store, err := NewSQLiteStore(db)
+	store, err := New(db)
 	if err != nil {
-		t.Fatalf("NewSQLiteStore: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	conn, tx, err := store.begin(ctx)
@@ -1415,19 +1417,19 @@ func TestSQLiteStore_Begin_AppliesPerTxPragmas(t *testing.T) {
 	}
 }
 
-// TestSQLiteStore_ListReflectsStateUpdates asserts that the List
+// TestStore_ListReflectsStateUpdates asserts that the List
 // metadata-only path returns freshly-persisted state alongside Load.
-// TestSQLiteStore_LastUsageRoundTrip verifies that a session's
+// TestStore_LastUsageRoundTrip verifies that a session's
 // LastUsage is persisted on Save and rehydrated on Load, including
 // the case where LastUsage changes between saves. The TUI depends on
 // this so reopening a session restores the model/context usage
 // suffix before any new turn runs.
-func TestSQLiteStore_LastUsageRoundTrip(t *testing.T) {
+func TestStore_LastUsageRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.Name = "usage-test"
 	sess.AppendMessage(conversation.Message{
 		Role:   conversation.RoleUser,
@@ -1471,7 +1473,7 @@ func TestSQLiteStore_LastUsageRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	var found *Session
+	var found *session.Session
 	for _, s := range list {
 		if s.ID == sess.ID {
 			found = s
@@ -1502,12 +1504,12 @@ func TestSQLiteStore_LastUsageRoundTrip(t *testing.T) {
 
 // If the UPDATE ever drops state_json again, this will catch it from
 // the listing code path too.
-func TestSQLiteStore_ListReflectsStateUpdates(t *testing.T) {
+func TestStore_ListReflectsStateUpdates(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := newFileStore(t)
 
-	sess := New()
+	sess := session.New()
 	sess.Name = "listtest"
 	sess.SetState("phase", "one")
 	sess.AppendMessage(conversation.Message{
@@ -1527,7 +1529,7 @@ func TestSQLiteStore_ListReflectsStateUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	var found *Session
+	var found *session.Session
 	for _, s := range list {
 		if s.ID == sess.ID {
 			found = s
@@ -1546,17 +1548,17 @@ func TestSQLiteStore_ListReflectsStateUpdates(t *testing.T) {
 // Pagination: SessionPaginator contract.
 // ---------------------------------------------------------------------
 
-// TestSQLiteStore_ListPage exercises the optional pagination capability
+// TestStore_ListPage exercises the optional pagination capability
 // — ordering, total count, default limit, negative limit, offset past
 // total, parity with List, Total reflecting Delete, and forks counting
 // as independent rows.
-func TestSQLiteStore_ListPage(t *testing.T) {
+func TestStore_ListPage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// Compile-time assertion that SQLiteStore satisfies the optional
+	// Compile-time assertion that Store satisfies the optional
 	// pagination interface.
-	var _ SessionPaginator = (*SQLiteStore)(nil)
+	var _ session.SessionPaginator = (*Store)(nil)
 
 	store := newFileStore(t)
 
@@ -1565,7 +1567,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	// drive the ranking.
 	ids := make([]string, 12)
 	for i := 0; i < 12; i++ {
-		s := New()
+		s := session.New()
 		s.Name = fmt.Sprintf("sess-%02d", i)
 		s.AppendMessage(conversation.Message{
 			Role:   conversation.RoleUser,
@@ -1582,7 +1584,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 
 	// First page: 5 newest, in updated-desc order. The most recently
 	// saved session (sess-11) must come first.
-	page, err := store.ListPage(ctx, ListOptions{Limit: 5})
+	page, err := store.ListPage(ctx, session.ListOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("ListPage: %v", err)
 	}
@@ -1604,7 +1606,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	}
 
 	// Second page: next 5.
-	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 5})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: 5, Offset: 5})
 	if err != nil {
 		t.Fatalf("ListPage offset=5: %v", err)
 	}
@@ -1619,7 +1621,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	}
 
 	// Last partial page.
-	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 10})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: 5, Offset: 10})
 	if err != nil {
 		t.Fatalf("ListPage offset=10: %v", err)
 	}
@@ -1628,7 +1630,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	}
 
 	// Offset past end.
-	page, err = store.ListPage(ctx, ListOptions{Limit: 5, Offset: 999})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: 5, Offset: 999})
 	if err != nil {
 		t.Fatalf("ListPage offset=999: %v", err)
 	}
@@ -1637,7 +1639,7 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	}
 
 	// Negative limit returns every row, parity with List by ID set.
-	page, err = store.ListPage(ctx, ListOptions{Limit: -1})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: -1})
 	if err != nil {
 		t.Fatalf("ListPage Limit=-1: %v", err)
 	}
@@ -1654,8 +1656,8 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 
 	// Default limit kicks in at Limit=0.
 	bigStore := newFileStore(t)
-	for i := 0; i < DefaultListLimit+5; i++ {
-		s := New()
+	for i := 0; i < session.DefaultListLimit+5; i++ {
+		s := session.New()
 		s.AppendMessage(conversation.Message{
 			Role:   conversation.RoleUser,
 			Blocks: []conversation.Block{{Type: conversation.BlockText, Text: fmt.Sprintf("%d", i)}},
@@ -1664,22 +1666,22 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 			t.Fatalf("seed save %d: %v", i, err)
 		}
 	}
-	page, err = bigStore.ListPage(ctx, ListOptions{})
+	page, err = bigStore.ListPage(ctx, session.ListOptions{})
 	if err != nil {
 		t.Fatalf("default ListPage: %v", err)
 	}
-	if len(page.Sessions) != DefaultListLimit {
-		t.Errorf("default page len = %d, want %d", len(page.Sessions), DefaultListLimit)
+	if len(page.Sessions) != session.DefaultListLimit {
+		t.Errorf("default page len = %d, want %d", len(page.Sessions), session.DefaultListLimit)
 	}
-	if page.Total != DefaultListLimit+5 {
-		t.Errorf("default Total = %d, want %d", page.Total, DefaultListLimit+5)
+	if page.Total != session.DefaultListLimit+5 {
+		t.Errorf("default Total = %d, want %d", page.Total, session.DefaultListLimit+5)
 	}
 
 	// Total reflects Delete.
 	if err := store.Delete(ctx, ids[0]); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	page, err = store.ListPage(ctx, ListOptions{Limit: 1})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: 1})
 	if err != nil {
 		t.Fatalf("ListPage after delete: %v", err)
 	}
@@ -1704,11 +1706,33 @@ func TestSQLiteStore_ListPage(t *testing.T) {
 	if forked.ID == parent {
 		t.Fatal("Fork returned the parent ID")
 	}
-	page, err = store.ListPage(ctx, ListOptions{Limit: 1})
+	page, err = store.ListPage(ctx, session.ListOptions{Limit: 1})
 	if err != nil {
 		t.Fatalf("ListPage after fork: %v", err)
 	}
 	if page.Total != 12 {
 		t.Errorf("Total after fork = %d, want 12 (11 originals + 1 fork)", page.Total)
 	}
+}
+
+// sameIDSet returns true if both slices contain the same session IDs
+// regardless of order.
+func sameIDSet(a, b []*session.Session) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	idsA := make([]string, len(a))
+	idsB := make([]string, len(b))
+	for i := range a {
+		idsA[i] = a[i].ID
+		idsB[i] = b[i].ID
+	}
+	sort.Strings(idsA)
+	sort.Strings(idsB)
+	for i := range idsA {
+		if idsA[i] != idsB[i] {
+			return false
+		}
+	}
+	return true
 }

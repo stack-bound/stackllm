@@ -421,3 +421,87 @@ func TestInMemoryStore_BlocksRoundTrip(t *testing.T) {
 		t.Errorf("redacted data len = %d", len(redacted.Blocks[0].RedactedData))
 	}
 }
+
+// TestInMemoryStore_ListPage_OffsetEdges covers the two offset guard
+// branches: a negative offset is treated as 0, and an offset past the
+// end returns an empty (non-nil) page while still reporting the true
+// total.
+func TestInMemoryStore_ListPage_OffsetEdges(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryStore()
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		s := New()
+		s.Name = fmt.Sprintf("s%d", i)
+		if err := store.Save(ctx, s); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	page, err := store.ListPage(ctx, ListOptions{Offset: -5, Limit: -1})
+	if err != nil {
+		t.Fatalf("ListPage negative offset: %v", err)
+	}
+	if len(page.Sessions) != 3 || page.Total != 3 {
+		t.Errorf("negative offset page = %d rows total %d, want all 3 rows (offset clamped to 0)", len(page.Sessions), page.Total)
+	}
+
+	page, err = store.ListPage(ctx, ListOptions{Offset: 99})
+	if err != nil {
+		t.Fatalf("ListPage past-end offset: %v", err)
+	}
+	if page.Sessions == nil || len(page.Sessions) != 0 {
+		t.Errorf("past-end offset returned %v, want empty non-nil slice", page.Sessions)
+	}
+	if page.Total != 3 {
+		t.Errorf("past-end offset Total = %d, want 3", page.Total)
+	}
+}
+
+// TestSession_SetStateNilMap covers SetState's lazy map init: a
+// zero-value Session (nil State) must accept and round-trip a value.
+func TestSession_SetStateNilMap(t *testing.T) {
+	t.Parallel()
+
+	var s Session
+	s.SetState("k", "v")
+	got, ok := s.GetState("k")
+	if !ok || got != "v" {
+		t.Errorf("GetState after SetState on nil map = (%v, %v), want (v, true)", got, ok)
+	}
+}
+
+// TestInMemoryStore_ListPage_UpdatedTieBreaksByID covers the sort
+// comparator's tie branch: sessions with identical Updated timestamps
+// must come back in deterministic ascending-ID order.
+func TestInMemoryStore_ListPage_UpdatedTieBreaksByID(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryStore()
+	ctx := context.Background()
+	tied := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	ids := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		s := New()
+		s.Updated = tied
+		if err := store.Save(ctx, s); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+		ids = append(ids, s.ID)
+	}
+	sort.Strings(ids)
+
+	page, err := store.ListPage(ctx, ListOptions{Limit: -1})
+	if err != nil {
+		t.Fatalf("ListPage: %v", err)
+	}
+	if len(page.Sessions) != 3 {
+		t.Fatalf("page len = %d, want 3", len(page.Sessions))
+	}
+	for i, s := range page.Sessions {
+		if s.ID != ids[i] {
+			t.Errorf("position %d = %s, want %s (ascending ID on tied Updated)", i, s.ID, ids[i])
+		}
+	}
+}

@@ -142,6 +142,7 @@ for ev := range events {
 - **Block accumulation.** `Step` collects blocks from `EventTypeBlockEnd` events in the order the provider closes them, then builds one assistant `Message` whose `Blocks` is the full interleaved timeline. When the assistant message contains one or more `BlockToolUse` blocks, the agent dispatches them and appends **one** tool-role `Message` containing one `BlockToolResult` per tool_use (matching the Anthropic shape).
 - **Stable IDs.** Assistant and tool messages are passed through `conversation.EnsureMessageIDs` before being returned, so every persisted message and block has a stable identifier.
 - `Hooks` — `BeforeCall`, `OnBlockStart`, `OnBlockDelta`, `OnBlockEnd`, `OnToken` (convenience wrapper that only fires for `BlockText` deltas), `OnToolCall`, `OnToolResult`, `AfterComplete`
+- **Concurrency.** An `Agent` is safe for concurrent use: `Run` snapshots the agent's options and wraps hooks in a per-run copy, so concurrent `Run` calls on one Agent never mutate shared state and each event channel receives only its own run's events. `SetProvider` / `SetModel` are the exception — they mutate the Agent and must not be called while a Run/Step is in progress.
 - Tool errors become `"Error: ..."` messages in the conversation (with `ToolIsError = true` on the block), not Go errors
 
 ### session/
@@ -183,7 +184,7 @@ type SessionPaginator interface {
   `Limit`/`Offset` so callers can render "page X of Y".
 - Sort order matches `List`: most-recently-updated first.
 - Embedders feature-detect: `if p, ok := store.(session.SessionPaginator); ok { ... }`.
-- Both `InMemoryStore` and `SQLiteStore` implement it. Like `List`,
+- Both `InMemoryStore` and `sqlitestore.Store` implement it. Like `List`,
   `ListPage` returns sessions with metadata populated and `Messages`
   empty — call `Load` for the rows you actually want to render.
 
@@ -192,24 +193,30 @@ embedder territory for now: the `stackllm_sessions` schema is
 documented and stable, so apps that need them can query through the
 shared `*sql.DB` returned by `store.DB()`.
 
-#### Session persistence (SQLiteStore)
+#### Session persistence (session/sqlitestore)
 
-`session.SQLiteStore` is the durable `SessionStore` implementation,
-built on `modernc.org/sqlite` so it requires no CGO and no
-separately-installed database. There are two constructors:
+`sqlitestore.Store` (import
+`github.com/stack-bound/stackllm/session/sqlitestore`) is the durable
+`session.SessionStore` implementation, built on `modernc.org/sqlite`
+so it requires no CGO and no separately-installed database. It lives
+in its own subpackage so that importing `session` for the interface /
+`Session` type never links the SQLite driver into an embedder's
+binary — the `session` package is guaranteed driver-free
+(`go list -deps ./session` must never include `modernc.org/sqlite`).
+There are two constructors:
 
 ```go
 // Simple embedders: let stackllm own the file.
-store, _ := session.OpenSQLiteStore(session.SQLiteConfig{AppName: "myapp"})
+store, _ := sqlitestore.Open(sqlitestore.Config{AppName: "myapp"})
 defer store.Close()
 
 // Parent apps that already own a *sql.DB and want to share the same
 // SQLite file with their own tables:
 db, _ := sql.Open("sqlite", dsn)
-store, _ := session.NewSQLiteStore(db) // Close is a no-op in this mode
+store, _ := sqlitestore.New(db) // Close is a no-op in this mode
 ```
 
-- **No silent default path.** `OpenSQLiteStore` errors if neither
+- **No silent default path.** `Open` errors if neither
   `AppName` nor `Path` is set. `AppName` resolves to
   `$XDG_DATA_HOME/{AppName}/state.db`; `Path` is an explicit
   override. Two embedders with different `AppName`s cannot collide.
@@ -249,7 +256,7 @@ store, _ := session.NewSQLiteStore(db) // Close is a no-op in this mode
   branch without deleting the old one.
 - **WAL + concurrent readers.** Pragmas (`journal_mode=wal`,
   `foreign_keys=1`, `busy_timeout=5000`, `synchronous=normal`)
-  are set via DSN on `OpenSQLiteStore`; `NewSQLiteStore` relies on
+  are set via DSN on `sqlitestore.Open`; `sqlitestore.New` relies on
   the caller for journal mode and enforces `foreign_keys` per
   transaction.
 
@@ -368,7 +375,7 @@ These rules are mandatory. Do not skip or shortcut any of them.
 | `github.com/charmbracelet/bubbles` | TUI components (tui/ only) |
 | `github.com/charmbracelet/lipgloss` | TUI styling (tui/ only) |
 | `github.com/google/uuid` | UUIDv7 generation for message / block / session IDs |
-| `modernc.org/sqlite` | Pure-Go SQLite driver powering `session.SQLiteStore` — no CGO, no sidecar database |
+| `modernc.org/sqlite` | Pure-Go SQLite driver powering `sqlitestore.Store` (session/sqlitestore only) — no CGO, no sidecar database |
 
 **What "minimal" means here.** stackllm is built to have **no external
 runtime requirements**: no sidecar processes, no separately-installed

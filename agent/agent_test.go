@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stack-bound/stackllm/conversation"
@@ -572,5 +574,420 @@ func TestAgent_Run_ForwardsUsageEvent(t *testing.T) {
 	}
 	if *gotUsage != usage {
 		t.Errorf("usage = %+v, want %+v", *gotUsage, usage)
+	}
+}
+
+// routingProvider is a concurrency-safe fake provider for testing
+// concurrent Run calls on one Agent. It is stateless per call: the
+// script to play is selected by the first user message's text, and
+// the position within that script by how many assistant messages the
+// request already carries. That makes it safe for any number of
+// interleaved Complete calls without locks.
+type routingProvider struct {
+	scripts map[string][][]provider.Event
+}
+
+func (r *routingProvider) Complete(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	var key string
+	assistants := 0
+	for _, m := range req.Messages {
+		if key == "" && m.Role == conversation.RoleUser {
+			key = m.TextContent()
+		}
+		if m.Role == conversation.RoleAssistant {
+			assistants++
+		}
+	}
+	script, ok := r.scripts[key]
+	if !ok {
+		return nil, fmt.Errorf("routingProvider: no script for %q", key)
+	}
+	if assistants >= len(script) {
+		return nil, fmt.Errorf("routingProvider: script %q exhausted at step %d", key, assistants)
+	}
+	ch := make(chan provider.Event, 64)
+	go func() {
+		defer close(ch)
+		for _, ev := range script[assistants] {
+			ch <- ev
+		}
+	}()
+	return ch, nil
+}
+
+func (r *routingProvider) Models(_ context.Context) ([]provider.ModelMeta, error) {
+	return nil, nil
+}
+
+// TestRun_ConcurrentRunsAreIsolated is the regression test for the
+// old Run implementation, which temporarily mutated a.opts.hooks on
+// the shared Agent per step: two concurrent Run calls raced on those
+// fields and delivered each other's events. Each run here drives a
+// distinct tool call and final text; every event on a run's channel
+// must belong to that run only, and the shared user hooks must still
+// fire once per tool call. Run with -race.
+func TestRun_ConcurrentRunsAreIsolated(t *testing.T) {
+	t.Parallel()
+
+	registry := tools.NewRegistry()
+	type noArgs struct{}
+	for _, name := range []string{"tool_A", "tool_B"} {
+		name := name
+		if err := registry.Register(name, "test tool "+name, func(_ context.Context, _ noArgs) (string, error) {
+			return "result-" + name[len(name)-1:], nil
+		}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+
+	scripts := map[string][][]provider.Event{}
+	for _, suffix := range []string{"A", "B"} {
+		scripts["run-"+suffix] = [][]provider.Event{
+			concat(
+				thinkingBlockEvents("thinking-"+suffix),
+				toolUseBlockEvents("call-"+suffix, "tool_"+suffix, "{}"),
+				[]provider.Event{{Type: provider.EventTypeDone}},
+			),
+			concat(
+				textBlockEvents("done-"+suffix),
+				[]provider.Event{{Type: provider.EventTypeDone}},
+			),
+		}
+	}
+	p := &routingProvider{scripts: scripts}
+
+	// Shared user hooks: record which tool calls fired so we can
+	// assert wrapping still chains to user hooks under concurrency.
+	var mu sync.Mutex
+	hookToolCalls := map[string]int{}
+	a := New(p,
+		WithTools(registry),
+		WithMaxSteps(5),
+		WithHooks(Hooks{
+			OnToolCall: func(_ context.Context, call conversation.ToolCall) {
+				mu.Lock()
+				hookToolCalls[call.Name]++
+				mu.Unlock()
+			},
+		}),
+	)
+
+	runAndCollect := func(suffix string) ([]Event, error) {
+		msgs := []conversation.Message{userMessage("run-" + suffix)}
+		ch, err := a.Run(context.Background(), msgs)
+		if err != nil {
+			return nil, err
+		}
+		var out []Event
+		for ev := range ch {
+			out = append(out, ev)
+		}
+		return out, nil
+	}
+
+	var wg sync.WaitGroup
+	results := make(map[string][]Event, 2)
+	errs := make(map[string]error, 2)
+	for _, suffix := range []string{"A", "B"} {
+		suffix := suffix
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			evs, err := runAndCollect(suffix)
+			mu.Lock()
+			results[suffix] = evs
+			errs[suffix] = err
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	other := map[string]string{"A": "B", "B": "A"}
+	for _, suffix := range []string{"A", "B"} {
+		if errs[suffix] != nil {
+			t.Fatalf("run %s: %v", suffix, errs[suffix])
+		}
+		evs := results[suffix]
+
+		var (
+			toolCalls   []conversation.ToolCall
+			toolResults []string
+			tokens      string
+			complete    *Event
+		)
+		for i := range evs {
+			ev := evs[i]
+			switch ev.Type {
+			case EventToolCall:
+				toolCalls = append(toolCalls, *ev.ToolCall)
+			case EventToolResult:
+				toolResults = append(toolResults, ev.ToolResult)
+			case EventToken:
+				tokens += ev.Content
+			case EventComplete:
+				complete = &evs[i]
+			case EventError:
+				t.Fatalf("run %s: unexpected error event: %v", suffix, ev.Err)
+			}
+
+			// No event on this run's channel may carry the other
+			// run's markers, in any field.
+			for _, s := range []string{ev.Content, ev.ToolResult} {
+				if strings.Contains(s, "-"+other[suffix]) {
+					t.Errorf("run %s: cross-wired event content %q", suffix, s)
+				}
+			}
+			if ev.ToolCall != nil && strings.Contains(ev.ToolCall.Name+ev.ToolCall.ID, "-"+other[suffix]) {
+				t.Errorf("run %s: cross-wired tool call %+v", suffix, ev.ToolCall)
+			}
+			if ev.Block != nil && strings.Contains(ev.Block.Text+ev.Block.ToolName+ev.Block.ToolCallID, other[suffix]) {
+				t.Errorf("run %s: cross-wired block %+v", suffix, ev.Block)
+			}
+		}
+
+		if len(toolCalls) != 1 || toolCalls[0].Name != "tool_"+suffix || toolCalls[0].ID != "call-"+suffix {
+			t.Errorf("run %s: tool calls = %+v, want exactly one tool_%s/call-%s", suffix, toolCalls, suffix, suffix)
+		}
+		if len(toolResults) != 1 || toolResults[0] != "result-"+suffix {
+			t.Errorf("run %s: tool results = %q, want [result-%s]", suffix, toolResults, suffix)
+		}
+		if tokens != "done-"+suffix {
+			t.Errorf("run %s: streamed text = %q, want %q", suffix, tokens, "done-"+suffix)
+		}
+		if complete == nil {
+			t.Fatalf("run %s: no EventComplete", suffix)
+		}
+
+		// The completed conversation must round-trip this run's data:
+		// user prompt, its own tool result payload, its own final text.
+		final := complete.Messages
+		if got := final[0].TextContent(); got != "run-"+suffix {
+			t.Errorf("run %s: first message = %q", suffix, got)
+		}
+		last := final[len(final)-1]
+		if got := last.TextContent(); got != "done-"+suffix {
+			t.Errorf("run %s: final message = %q, want done-%s", suffix, got, suffix)
+		}
+		foundResult := false
+		for _, m := range final {
+			for _, tr := range m.ToolResults() {
+				if tr.Text == "result-"+suffix {
+					foundResult = true
+				}
+				if strings.Contains(tr.Text, "result-"+other[suffix]) {
+					t.Errorf("run %s: conversation contains other run's tool result %q", suffix, tr.Text)
+				}
+			}
+		}
+		if !foundResult {
+			t.Errorf("run %s: persisted conversation missing tool result result-%s", suffix, suffix)
+		}
+	}
+
+	// Shared user hooks fired exactly once per run's tool call.
+	mu.Lock()
+	defer mu.Unlock()
+	if hookToolCalls["tool_A"] != 1 || hookToolCalls["tool_B"] != 1 {
+		t.Errorf("user OnToolCall hook counts = %v, want tool_A:1 tool_B:1", hookToolCalls)
+	}
+}
+
+// TestRun_AllHooksChainDuringRun drives a full Run (tool step + final
+// text) with every user hook set and asserts each hook received the
+// actual payloads — block order, delta text, tool call/result values,
+// usage numbers, and the final evolved conversation in AfterComplete.
+// This pins the emittingHooks chaining contract: Run's event emission
+// must never swallow or reorder the user's own hooks.
+func TestRun_AllHooksChainDuringRun(t *testing.T) {
+	t.Parallel()
+
+	registry := tools.NewRegistry()
+	type noArgs struct{}
+	if err := registry.Register("echo", "echo tool", func(_ context.Context, _ noArgs) (string, error) {
+		return "echo-result", nil
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	usage := conversation.TokenUsage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10}
+	p := &mockProvider{responses: [][]provider.Event{
+		concat(
+			thinkingBlockEvents("hmm"),
+			toolUseBlockEvents("call-1", "echo", "{}"),
+			[]provider.Event{{Type: provider.EventTypeUsage, Usage: &usage}, {Type: provider.EventTypeDone}},
+		),
+		concat(
+			textBlockEvents("final"),
+			[]provider.Event{{Type: provider.EventTypeDone}},
+		),
+	}}
+
+	// All writes below happen in Run's goroutine; the channel close
+	// after the deferred AfterComplete gives the happens-before edge
+	// that makes reading them after the drain race-free.
+	var (
+		beforeCalls int
+		blockStarts []conversation.BlockType
+		blockEnds   []conversation.BlockType
+		deltas      = map[conversation.BlockType]string{}
+		tokens      string
+		toolCalls   []string
+		toolResults []string
+		usages      []conversation.TokenUsage
+		afterMsgs   []conversation.Message
+	)
+	a := New(p,
+		WithTools(registry),
+		WithMaxSteps(5),
+		WithHooks(Hooks{
+			BeforeCall: func(_ context.Context, msgs []conversation.Message) { beforeCalls++ },
+			OnToken:    func(_ context.Context, delta string) { tokens += delta },
+			OnBlockStart: func(_ context.Context, bt conversation.BlockType) {
+				blockStarts = append(blockStarts, bt)
+			},
+			OnBlockDelta: func(_ context.Context, bt conversation.BlockType, delta string) {
+				deltas[bt] += delta
+			},
+			OnBlockEnd: func(_ context.Context, blk conversation.Block) {
+				blockEnds = append(blockEnds, blk.Type)
+			},
+			OnToolCall: func(_ context.Context, call conversation.ToolCall) {
+				toolCalls = append(toolCalls, call.Name)
+			},
+			OnToolResult: func(_ context.Context, call conversation.ToolCall, result string, err error) {
+				toolResults = append(toolResults, result)
+			},
+			OnUsage: func(_ context.Context, u conversation.TokenUsage) {
+				usages = append(usages, u)
+			},
+			AfterComplete: func(_ context.Context, msgs []conversation.Message) {
+				afterMsgs = append([]conversation.Message(nil), msgs...)
+			},
+		}),
+	)
+
+	ch, err := a.Run(context.Background(), []conversation.Message{userMessage("hi")})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for ev := range ch {
+		if ev.Type == EventError {
+			t.Fatalf("unexpected error event: %v", ev.Err)
+		}
+	}
+
+	if beforeCalls != 2 {
+		t.Errorf("BeforeCall fired %d times, want 2 (one per step)", beforeCalls)
+	}
+	wantOrder := []conversation.BlockType{conversation.BlockThinking, conversation.BlockToolUse, conversation.BlockText}
+	if fmt.Sprint(blockStarts) != fmt.Sprint(wantOrder) {
+		t.Errorf("OnBlockStart order = %v, want %v", blockStarts, wantOrder)
+	}
+	if fmt.Sprint(blockEnds) != fmt.Sprint(wantOrder) {
+		t.Errorf("OnBlockEnd order = %v, want %v", blockEnds, wantOrder)
+	}
+	if deltas[conversation.BlockThinking] != "hmm" || deltas[conversation.BlockText] != "final" {
+		t.Errorf("OnBlockDelta accumulated = %v, want thinking:hmm text:final", deltas)
+	}
+	if tokens != "final" {
+		t.Errorf("OnToken accumulated = %q, want %q (text deltas only)", tokens, "final")
+	}
+	if len(toolCalls) != 1 || toolCalls[0] != "echo" {
+		t.Errorf("OnToolCall = %v, want [echo]", toolCalls)
+	}
+	if len(toolResults) != 1 || toolResults[0] != "echo-result" {
+		t.Errorf("OnToolResult = %v, want [echo-result]", toolResults)
+	}
+	if len(usages) != 1 || usages[0] != usage {
+		t.Errorf("OnUsage = %v, want [%v]", usages, usage)
+	}
+	if afterMsgs == nil {
+		t.Fatal("AfterComplete never fired")
+	}
+	if got := afterMsgs[len(afterMsgs)-1].TextContent(); got != "final" {
+		t.Errorf("AfterComplete final message = %q, want %q", got, "final")
+	}
+	foundResult := false
+	for _, m := range afterMsgs {
+		for _, tr := range m.ToolResults() {
+			if tr.Text == "echo-result" {
+				foundResult = true
+			}
+		}
+	}
+	if !foundResult {
+		t.Error("AfterComplete conversation missing tool result echo-result")
+	}
+}
+
+// TestAgent_SetProviderAndSetModel pins the (single-goroutine) mutator
+// contract: SetProvider swaps which backend the next Step hits, and
+// SetModel changes both the Model() getter and the model stamped on
+// the next assistant message.
+func TestAgent_SetProviderAndSetModel(t *testing.T) {
+	t.Parallel()
+
+	pA := &mockProvider{responses: [][]provider.Event{concat(
+		textBlockEvents("from-A"), []provider.Event{{Type: provider.EventTypeDone}},
+	)}}
+	pB := &mockProvider{responses: [][]provider.Event{concat(
+		textBlockEvents("from-B"), []provider.Event{{Type: provider.EventTypeDone}},
+	)}}
+
+	a := New(pA)
+	// No WithModel and mockProvider exposes no Model() method, so the
+	// getter's final fallback must report empty.
+	if got := a.Model(); got != "" {
+		t.Errorf("Model() before SetModel = %q, want empty", got)
+	}
+
+	_, res, err := a.Step(context.Background(), []conversation.Message{userMessage("hi")})
+	if err != nil {
+		t.Fatalf("Step on provider A: %v", err)
+	}
+	if got := res.AssistantMessage.TextContent(); got != "from-A" {
+		t.Errorf("provider A response = %q, want from-A", got)
+	}
+
+	a.SetProvider(pB)
+	a.SetModel("model-b")
+	if got := a.Model(); got != "model-b" {
+		t.Errorf("Model() after SetModel = %q, want model-b", got)
+	}
+
+	_, res, err = a.Step(context.Background(), []conversation.Message{userMessage("hi")})
+	if err != nil {
+		t.Fatalf("Step on provider B: %v", err)
+	}
+	if got := res.AssistantMessage.TextContent(); got != "from-B" {
+		t.Errorf("provider B response = %q, want from-B", got)
+	}
+	if got := res.AssistantMessage.Model; got != "model-b" {
+		t.Errorf("assistant message model = %q, want model-b", got)
+	}
+}
+
+// TestStep_ProviderCompleteError covers the path where the provider's
+// Complete call itself fails (before any stream exists): Step must
+// wrap the error and leave the conversation untouched.
+func TestStep_ProviderCompleteError(t *testing.T) {
+	t.Parallel()
+
+	p := &mockProvider{} // zero responses → Complete returns an error
+	a := New(p)
+
+	in := []conversation.Message{userMessage("hi")}
+	out, res, err := a.Step(context.Background(), in)
+	if err == nil {
+		t.Fatal("Step returned nil error, want provider failure")
+	}
+	if !strings.Contains(err.Error(), "agent: complete:") {
+		t.Errorf("error = %q, want it wrapped with %q", err, "agent: complete:")
+	}
+	if len(out) != 1 || out[0].TextContent() != "hi" {
+		t.Errorf("conversation after failed Step = %v, want the original single message", out)
+	}
+	if res.Done || len(res.ToolResults) != 0 {
+		t.Errorf("StepResult after failure = %+v, want zero value", res)
 	}
 }

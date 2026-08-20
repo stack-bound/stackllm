@@ -79,7 +79,7 @@ func (f *fullFakeStore) Fork(_ context.Context, srcSessionID, atMessageID, newNa
 		return nil, fmt.Errorf("not found: %s", srcSessionID)
 	}
 	// Copy the chain up to and including the requested message,
-	// mirroring SQLiteStore.Fork's semantics well enough for the
+	// mirroring sqlitestore.Store.Fork's semantics well enough for the
 	// test to observe a fork result with a fresh ID.
 	fork := session.New()
 	fork.Name = newName

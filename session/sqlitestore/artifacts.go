@@ -1,4 +1,4 @@
-package session
+package sqlitestore
 
 import (
 	"crypto/sha256"
@@ -54,7 +54,7 @@ func extractPreview(s string) string {
 // shouldOffloadText reports whether a text payload of the given length
 // should be written to stackllm_artifacts instead of inline on the
 // block row. The threshold is a library constant; exposing it through
-// SQLiteConfig is a trivial follow-up.
+// Config is a trivial follow-up.
 func shouldOffloadText(n int) bool {
 	return n > defaultArtifactThreshold
 }

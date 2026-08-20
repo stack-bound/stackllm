@@ -14,18 +14,19 @@ import (
 )
 
 // SessionForker is the capability a SessionStore opts into when it can
-// branch a session at a chosen message. SQLiteStore implements this via
-// Fork; in-memory and other lightweight stores may not.
+// branch a session at a chosen message. sqlitestore.Store implements
+// this via Fork; in-memory and other lightweight stores may not.
 //
 // The interface is defined here (the consumer side) rather than in the
-// session package so tui doesn't need to depend on SQLiteStore directly
-// — per the "interfaces defined where consumed" convention.
+// session package so tui doesn't need to depend on the SQLite-backed
+// store directly — per the "interfaces defined where consumed"
+// convention.
 type SessionForker interface {
 	Fork(ctx context.Context, srcSessionID, atMessageID, newName string) (*session.Session, error)
 }
 
 // SessionExporter is the capability a SessionStore opts into when it
-// can serialise a session to JSONL. Matches SQLiteStore.ExportJSONL.
+// can serialise a session to JSONL. Matches sqlitestore.Store.ExportJSONL.
 type SessionExporter interface {
 	ExportJSONL(ctx context.Context, sessionID string, w io.Writer) error
 }

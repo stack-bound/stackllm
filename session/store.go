@@ -10,6 +10,14 @@ import (
 )
 
 // SessionStore persists sessions.
+//
+// GUARANTEE: the session package must stay free of database-driver
+// dependencies. Embedders import it for the interface, Session type,
+// and InMemoryStore, and must not have a SQL driver (or any other
+// storage backend) linked into their binary as a side effect. The
+// SQLite-backed implementation lives in the session/sqlitestore
+// subpackage precisely so that only apps that want it pay for it —
+// do not add driver imports here.
 type SessionStore interface {
 	Save(ctx context.Context, s *Session) error
 	Load(ctx context.Context, id string) (*Session, error)
@@ -38,7 +46,7 @@ type ListResult struct {
 
 // SessionPaginator is the optional capability a SessionStore opts
 // into when it can return sessions in pages. Both the built-in
-// InMemoryStore and SQLiteStore implement it; embedders can
+// InMemoryStore and sqlitestore.Store implement it; embedders can
 // feature-detect via type assertion.
 //
 // Sort order matches List: most-recently-updated first.

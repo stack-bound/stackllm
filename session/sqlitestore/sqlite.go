@@ -1,17 +1,23 @@
-// Package session — SQLite-backed persistent SessionStore.
+// Package sqlitestore — SQLite-backed persistent session.SessionStore.
 //
-// SQLiteStore implements SessionStore against a pure-Go SQLite build
-// (modernc.org/sqlite), so embedders get durable session history
+// Store implements session.SessionStore against a pure-Go SQLite
+// build (modernc.org/sqlite), so embedders get durable session history
 // without a separately-installed database or CGO. The schema matches
 // the block-oriented conversation model introduced in Phase 1: every
 // message row is a tree node with a parent_id, and every block row is
 // one element of a message's ordered Blocks slice.
 //
+// This package lives in its own subpackage (rather than in session)
+// so that embedders who bring their own SessionStore implementation
+// never link modernc.org/sqlite into their binary. Import
+// github.com/stack-bound/stackllm/session/sqlitestore only when you
+// actually want the SQLite-backed store.
+//
 // Parent applications can safely create their own tables in the same
 // SQLite file; all stackllm-owned tables are prefixed `stackllm_` and
 // a parent app that avoids that prefix is guaranteed not to collide.
-// See NewSQLiteStore for the shared-DB pattern.
-package session
+// See New for the shared-DB pattern.
+package sqlitestore
 
 import (
 	"context"
@@ -28,15 +34,23 @@ import (
 	"time"
 
 	"github.com/stack-bound/stackllm/conversation"
+	"github.com/stack-bound/stackllm/session"
 
 	_ "modernc.org/sqlite"
 )
 
-// SQLiteConfig configures OpenSQLiteStore. Exactly one of AppName or
+// Compile-time proof that Store implements the session package's
+// store interface and every optional capability it exposes.
+var (
+	_ session.SessionStore     = (*Store)(nil)
+	_ session.SessionPaginator = (*Store)(nil)
+)
+
+// Config configures Open. Exactly one of AppName or
 // Path must be set. Forgetting to set either is an error — stackllm
 // never writes to a silent default path because two embedders using
 // the same default would collide.
-type SQLiteConfig struct {
+type Config struct {
 	// AppName auto-builds $XDG_DATA_HOME/{AppName}/state.db.
 	// Ignored if Path is set.
 	AppName string
@@ -47,30 +61,30 @@ type SQLiteConfig struct {
 }
 
 // resolvePath turns the config into a concrete filesystem path.
-func (cfg SQLiteConfig) resolvePath() (string, error) {
+func (cfg Config) resolvePath() (string, error) {
 	if cfg.Path != "" {
 		return cfg.Path, nil
 	}
 	if cfg.AppName == "" {
-		return "", errors.New("session: SQLiteConfig requires either AppName or Path")
+		return "", errors.New("sqlitestore: Config requires either AppName or Path")
 	}
 	dir := os.Getenv("XDG_DATA_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("session: resolve home: %w", err)
+			return "", fmt.Errorf("sqlitestore: resolve home: %w", err)
 		}
 		dir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dir, cfg.AppName, "state.db"), nil
 }
 
-// SQLiteStore is the SQLite-backed SessionStore. Construct it with
-// OpenSQLiteStore for simple embedders or NewSQLiteStore for parent
+// Store is the SQLite-backed SessionStore. Construct it with
+// Open for simple embedders or New for parent
 // apps that already own a *sql.DB.
-type SQLiteStore struct {
+type Store struct {
 	db    *sql.DB
-	owned bool // true if OpenSQLiteStore allocated the DB — controls Close semantics
+	owned bool // true if Open allocated the DB — controls Close semantics
 }
 
 // BranchRef identifies one branch from a branch point in a session's
@@ -95,20 +109,20 @@ type SearchHit struct {
 	Rank      float64
 }
 
-// OpenSQLiteStore opens or creates a SQLite-backed store at the
+// Open opens or creates a SQLite-backed store at the
 // configured path, applies pragmas, runs migrations, and returns a
 // ready-to-use store. The parent directory is created on demand.
 //
 // Callers that already own a *sql.DB (for example, to share a
 // connection pool with parent-app tables in the same file) should use
-// NewSQLiteStore instead.
-func OpenSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
+// New instead.
+func Open(cfg Config) (*Store, error) {
 	path, err := cfg.resolvePath()
 	if err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("session: create data dir: %w", err)
+		return nil, fmt.Errorf("sqlitestore: create data dir: %w", err)
 	}
 
 	// DSN-level pragmas apply on every new connection in the pool.
@@ -119,10 +133,10 @@ func OpenSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("session: open sqlite: %w", err)
+		return nil, fmt.Errorf("sqlitestore: open sqlite: %w", err)
 	}
 
-	store := &SQLiteStore{db: db, owned: true}
+	store := &Store{db: db, owned: true}
 	if err := store.bootstrap(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -130,33 +144,33 @@ func OpenSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 	return store, nil
 }
 
-// NewSQLiteStore wraps an already-open *sql.DB. The caller owns the
+// New wraps an already-open *sql.DB. The caller owns the
 // DB's lifecycle; Close() on the returned store is a no-op.
 //
 // Pragma semantics for caller-owned pools:
 //   - journal_mode=WAL is applied once during bootstrap. WAL mode is a
 //     file-level setting that persists across connections and across
 //     process restarts, so a single PRAGMA is enough to give the whole
-//     pool the concurrency guarantees OpenSQLiteStore promises. No-op
+//     pool the concurrency guarantees Open promises. No-op
 //     for :memory: (SQLite silently leaves in-memory databases in
 //     MEMORY mode).
 //   - foreign_keys=ON and busy_timeout=5000 are applied on every
 //     transaction begin() opens, so any connection the pool checks out
 //     for a stackllm transaction inherits cascade-delete and
-//     busy-waiting behavior matching OpenSQLiteStore.
+//     busy-waiting behavior matching Open.
 //   - synchronous=NORMAL CANNOT be changed from inside a transaction
 //     (SQLite rejects it), and a caller-owned *sql.DB may check out a
 //     different connection for every statement. stackllm therefore
 //     does not touch synchronous for caller-owned pools — the
 //     SQLite default (FULL) applies unless the caller sets NORMAL in
 //     their own DSN. If you want the same "durable but fast" profile
-//     as OpenSQLiteStore, add _pragma=synchronous(normal) to the DSN
+//     as Open, add _pragma=synchronous(normal) to the DSN
 //     you pass to sql.Open. See examples/sqlite for the full shape.
 //
 // IMPORTANT: parent apps that share the DB must not create tables
 // using the `stackllm_` prefix; that namespace is reserved.
-func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
-	store := &SQLiteStore{db: db, owned: false}
+func New(db *sql.DB) (*Store, error) {
+	store := &Store{db: db, owned: false}
 	if err := store.bootstrap(context.Background()); err != nil {
 		return nil, err
 	}
@@ -178,9 +192,9 @@ func buildDSN(path string) string {
 
 // bootstrap runs the FTS5 availability check, applies the one-shot
 // file-level pragmas (journal_mode=WAL), and runs migrations. Called
-// from both OpenSQLiteStore and NewSQLiteStore so shared-DB callers
+// from both Open and New so shared-DB callers
 // get the same schema and concurrency guarantees as standalone ones.
-func (s *SQLiteStore) bootstrap(ctx context.Context) error {
+func (s *Store) bootstrap(ctx context.Context) error {
 	if err := checkFTS5Available(ctx, s.db); err != nil {
 		return err
 	}
@@ -204,7 +218,7 @@ func (s *SQLiteStore) bootstrap(ctx context.Context) error {
 func applyFileLevelPragmas(ctx context.Context, db *sql.DB) error {
 	var mode string
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode); err != nil {
-		return fmt.Errorf("session: set journal_mode=wal: %w", err)
+		return fmt.Errorf("sqlitestore: set journal_mode=wal: %w", err)
 	}
 	return nil
 }
@@ -218,19 +232,19 @@ var probeCompileOptions = defaultProbeCompileOptions
 func defaultProbeCompileOptions(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
 	rows, err := db.QueryContext(ctx, `PRAGMA compile_options`)
 	if err != nil {
-		return nil, fmt.Errorf("session: probe compile_options: %w", err)
+		return nil, fmt.Errorf("sqlitestore: probe compile_options: %w", err)
 	}
 	defer rows.Close()
 	out := make(map[string]struct{})
 	for rows.Next() {
 		var opt string
 		if err := rows.Scan(&opt); err != nil {
-			return nil, fmt.Errorf("session: scan compile_option: %w", err)
+			return nil, fmt.Errorf("sqlitestore: scan compile_option: %w", err)
 		}
 		out[opt] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("session: iterate compile_options: %w", err)
+		return nil, fmt.Errorf("sqlitestore: iterate compile_options: %w", err)
 	}
 	return out, nil
 }
@@ -247,7 +261,7 @@ func checkFTS5Available(ctx context.Context, db *sql.DB) error {
 	if _, ok := opts["ENABLE_FTS5"]; ok {
 		return nil
 	}
-	return errors.New("session: SQLite build is missing ENABLE_FTS5 — stackllm requires FTS5 for block search")
+	return errors.New("sqlitestore: SQLite build is missing ENABLE_FTS5 — stackllm requires FTS5 for block search")
 }
 
 // runMigrations applies pending schema migrations in a single
@@ -265,36 +279,36 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 		// "no such table" is expected on a fresh DB; any other error
 		// means something is actually wrong.
 		if !strings.Contains(err.Error(), "no such table") {
-			return fmt.Errorf("session: read schema version: %w", err)
+			return fmt.Errorf("sqlitestore: read schema version: %w", err)
 		}
 		current = 0
 	}
 
 	if current > latestSchemaVersion {
-		return fmt.Errorf("session: database schema version %d is newer than supported version %d — upgrade stackllm to read this database", current, latestSchemaVersion)
+		return fmt.Errorf("sqlitestore: database schema version %d is newer than supported version %d — upgrade stackllm to read this database", current, latestSchemaVersion)
 	}
 
 	for v := current; v < latestSchemaVersion; v++ {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("session: begin migration %d: %w", v+1, err)
+			return fmt.Errorf("sqlitestore: begin migration %d: %w", v+1, err)
 		}
 		if _, err := tx.ExecContext(ctx, migrations[v]); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("session: apply migration %d: %w", v+1, err)
+			return fmt.Errorf("sqlitestore: apply migration %d: %w", v+1, err)
 		}
 		// Upsert the version row. A fresh DB has no row; upgrades
 		// have exactly one.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM stackllm_schema_version`); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("session: clear schema version: %w", err)
+			return fmt.Errorf("sqlitestore: clear schema version: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO stackllm_schema_version(version) VALUES(?)`, v+1); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("session: record schema version %d: %w", v+1, err)
+			return fmt.Errorf("sqlitestore: record schema version %d: %w", v+1, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("session: commit migration %d: %w", v+1, err)
+			return fmt.Errorf("sqlitestore: commit migration %d: %w", v+1, err)
 		}
 	}
 	return nil
@@ -315,29 +329,29 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 // foreign_keys") silently did nothing for caller-owned pools whose
 // DSN did not already set the pragma. Reserving a conn lets us apply
 // foreign_keys and busy_timeout before BeginTx, guaranteeing
-// cascade-delete and busy-wait semantics match OpenSQLiteStore for
+// cascade-delete and busy-wait semantics match Open for
 // both store types.
 //
 // synchronous cannot be changed inside a transaction at all and we
-// deliberately do not touch it here either — see the NewSQLiteStore
+// deliberately do not touch it here either — see the New
 // doc comment for the rationale.
-func (s *SQLiteStore) begin(ctx context.Context) (*sql.Conn, *sql.Tx, error) {
+func (s *Store) begin(ctx context.Context) (*sql.Conn, *sql.Tx, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("session: reserve connection: %w", err)
+		return nil, nil, fmt.Errorf("sqlitestore: reserve connection: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("session: enable foreign keys: %w", err)
+		return nil, nil, fmt.Errorf("sqlitestore: enable foreign keys: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 5000`); err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("session: set busy_timeout: %w", err)
+		return nil, nil, fmt.Errorf("sqlitestore: set busy_timeout: %w", err)
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("session: begin tx: %w", err)
+		return nil, nil, fmt.Errorf("sqlitestore: begin tx: %w", err)
 	}
 	return conn, tx, nil
 }
@@ -355,16 +369,16 @@ func releaseTx(conn *sql.Conn, tx *sql.Tx) {
 }
 
 // DB exposes the underlying *sql.DB so parent apps that used
-// OpenSQLiteStore can run their own queries against the same file.
+// Open can run their own queries against the same file.
 // Parent-app tables MUST NOT use the stackllm_ prefix.
-func (s *SQLiteStore) DB() *sql.DB {
+func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
 // Close closes the underlying *sql.DB iff the store opened it.
-// Stores created via NewSQLiteStore do not own the DB and Close is a
+// Stores created via New do not own the DB and Close is a
 // no-op in that case.
-func (s *SQLiteStore) Close() error {
+func (s *Store) Close() error {
 	if !s.owned {
 		return nil
 	}
@@ -385,12 +399,12 @@ func (s *SQLiteStore) Close() error {
 // calling Save again has no effect: the block's ID already exists in
 // the DB and the in-memory mutation is silently dropped. Mutations
 // must go through Rewind + a new message, or through Fork.
-func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
+func (s *Store) Save(ctx context.Context, sess *session.Session) error {
 	if sess == nil {
-		return errors.New("session: Save: nil session")
+		return errors.New("sqlitestore: Save: nil session")
 	}
 	if sess.ID == "" {
-		return errors.New("session: Save: session has no ID")
+		return errors.New("sqlitestore: Save: session has no ID")
 	}
 
 	// Every message and block must have an ID before Save runs. This
@@ -403,7 +417,7 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 
 	conn, tx, err := s.begin(ctx)
 	if err != nil {
-		return fmt.Errorf("session: Save: begin: %w", err)
+		return fmt.Errorf("sqlitestore: Save: begin: %w", err)
 	}
 	defer releaseTx(conn, tx)
 
@@ -415,14 +429,14 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 	// any SetState mutations after the first save.
 	stateJSON, err := marshalState(sess.State)
 	if err != nil {
-		return fmt.Errorf("session: Save: marshal state: %w", err)
+		return fmt.Errorf("sqlitestore: Save: marshal state: %w", err)
 	}
 
 	// Upsert the session row.
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM stackllm_sessions WHERE id = ?`, sess.ID).Scan(&exists); err != nil {
 		if err != sql.ErrNoRows {
-			return fmt.Errorf("session: Save: probe session: %w", err)
+			return fmt.Errorf("sqlitestore: Save: probe session: %w", err)
 		}
 		// Insert new session. metadata_json is reserved for future
 		// stackllm-owned fields and starts as an empty object; state
@@ -449,7 +463,7 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 			formatTime(now),
 			promptTok, completionTok, totalTok,
 		); err != nil {
-			return fmt.Errorf("session: Save: insert session row: %w", err)
+			return fmt.Errorf("sqlitestore: Save: insert session row: %w", err)
 		}
 		sess.Created = created
 	}
@@ -466,11 +480,11 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 
 	existingMsgs, existingParents, err := loadExistingMessages(ctx, tx, sess.ID, msgIDs)
 	if err != nil {
-		return fmt.Errorf("session: Save: lookup existing messages: %w", err)
+		return fmt.Errorf("sqlitestore: Save: lookup existing messages: %w", err)
 	}
 	existingBlocks, err := loadExistingBlockIDs(ctx, tx, blockIDs)
 	if err != nil {
-		return fmt.Errorf("session: Save: lookup existing blocks: %w", err)
+		return fmt.Errorf("sqlitestore: Save: lookup existing blocks: %w", err)
 	}
 
 	// Walk the in-memory chain forward, validating existing rows and
@@ -487,13 +501,13 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 			// diverged from the DB — typically a caller bug.
 			dbParent := existingParents[msg.ID]
 			if !parentMatches(dbParent, runningParent) {
-				return fmt.Errorf("session: save: message %s parent chain diverged from DB", msg.ID)
+				return fmt.Errorf("sqlitestore: save: message %s parent chain diverged from DB", msg.ID)
 			}
 			// Append any newly-appended blocks at the tail. This is
 			// the rare case where a persisted message grew (e.g. a
 			// tool-role message gained an extra tool_result).
 			if err := appendNewBlocksToExistingMessage(ctx, tx, msg, existingBlocks, now); err != nil {
-				return fmt.Errorf("session: Save: extend message %s: %w", msg.ID, err)
+				return fmt.Errorf("sqlitestore: Save: extend message %s: %w", msg.ID, err)
 			}
 			runningParent = sql.NullString{String: msg.ID, Valid: true}
 			continue
@@ -520,13 +534,13 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 			durationMS,
 			formatTime(createdAt),
 		); err != nil {
-			return fmt.Errorf("session: Save: insert message %s: %w", msg.ID, err)
+			return fmt.Errorf("sqlitestore: Save: insert message %s: %w", msg.ID, err)
 		}
 
 		// Insert all blocks in order. Seq is the 0-based position.
 		for bi := range msg.Blocks {
 			if err := insertBlock(ctx, tx, msg.ID, bi, &msg.Blocks[bi], now); err != nil {
-				return fmt.Errorf("session: Save: insert block %s: %w", msg.Blocks[bi].ID, err)
+				return fmt.Errorf("sqlitestore: Save: insert block %s: %w", msg.Blocks[bi].ID, err)
 			}
 		}
 
@@ -553,11 +567,11 @@ func (s *SQLiteStore) Save(ctx context.Context, sess *Session) error {
 		promptTok, completionTok, totalTok,
 		sess.ID,
 	); err != nil {
-		return fmt.Errorf("session: Save: update session row: %w", err)
+		return fmt.Errorf("sqlitestore: Save: update session row: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("session: Save: commit: %w", err)
+		return fmt.Errorf("sqlitestore: Save: commit: %w", err)
 	}
 	sess.Updated = now
 	return nil
@@ -764,7 +778,7 @@ func insertBlock(ctx context.Context, tx *sql.Tx, msgID string, seq int, b *conv
 		}
 
 	default:
-		return fmt.Errorf("session: insertBlock: unknown block type %q", b.Type)
+		return fmt.Errorf("sqlitestore: insertBlock: unknown block type %q", b.Type)
 	}
 
 	_, err := tx.ExecContext(ctx, `
@@ -807,7 +821,7 @@ func upsertArtifact(ctx context.Context, tx *sql.Tx, data []byte, mimeType strin
 		return existing, nil
 	}
 	if err != sql.ErrNoRows {
-		return "", fmt.Errorf("session: artifact lookup: %w", err)
+		return "", fmt.Errorf("sqlitestore: artifact lookup: %w", err)
 	}
 
 	id := conversation.NewID()
@@ -816,7 +830,7 @@ func upsertArtifact(ctx context.Context, tx *sql.Tx, data []byte, mimeType strin
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		id, hash, mimeType, int64(len(data)), data, formatTime(now),
 	); err != nil {
-		return "", fmt.Errorf("session: insert artifact: %w", err)
+		return "", fmt.Errorf("sqlitestore: insert artifact: %w", err)
 	}
 	return id, nil
 }
@@ -844,23 +858,23 @@ func parentMatches(db sql.NullString, expected sql.NullString) bool {
 // ArtifactRef and either a preview (tool_result) or empty
 // Text/ImageData. Callers that need the full bytes call
 // HydrateArtifact on demand.
-func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
+func (s *Store) Load(ctx context.Context, id string) (*session.Session, error) {
 	if id == "" {
-		return nil, errors.New("session: Load: empty id")
+		return nil, errors.New("sqlitestore: Load: empty id")
 	}
 
 	var (
-		name            sql.NullString
-		projectPath     sql.NullString
-		model           sql.NullString
-		metadataJSON    string
-		stateJSON       string
-		leafID          sql.NullString
-		created         string
-		updated         string
-		promptTokens    sql.NullInt64
+		name             sql.NullString
+		projectPath      sql.NullString
+		model            sql.NullString
+		metadataJSON     string
+		stateJSON        string
+		leafID           sql.NullString
+		created          string
+		updated          string
+		promptTokens     sql.NullInt64
 		completionTokens sql.NullInt64
-		totalTokens     sql.NullInt64
+		totalTokens      sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT name, project_path, model, metadata_json, state_json,
@@ -870,19 +884,19 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
 	).Scan(&name, &projectPath, &model, &metadataJSON, &stateJSON, &leafID, &created, &updated,
 		&promptTokens, &completionTokens, &totalTokens)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("session: %q not found", id)
+		return nil, fmt.Errorf("sqlitestore: %q not found", id)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("session: Load: session row: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Load: session row: %w", err)
 	}
 	_ = metadataJSON // reserved for future stackllm-owned fields
 
 	state, err := unmarshalState(stateJSON)
 	if err != nil {
-		return nil, fmt.Errorf("session: Load: state: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Load: state: %w", err)
 	}
 
-	sess := &Session{
+	sess := &session.Session{
 		ID:          id,
 		Name:        name.String,
 		ProjectPath: projectPath.String,
@@ -908,14 +922,14 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Session, error) {
 	// Fetch all message rows in one query, reverse, preserve order.
 	msgs, err := loadMessageRows(ctx, s.db, msgIDs)
 	if err != nil {
-		return nil, fmt.Errorf("session: Load: message rows: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Load: message rows: %w", err)
 	}
 
 	// Fetch all blocks for those messages in one query, ordered by
 	// (message_id, seq). Group into each message's Blocks slice.
 	blockMap, err := loadBlocksForMessages(ctx, s.db, msgIDs)
 	if err != nil {
-		return nil, fmt.Errorf("session: Load: block rows: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Load: block rows: %w", err)
 	}
 	for i := range msgs {
 		msgs[i].Blocks = blockMap[msgs[i].ID]
@@ -944,7 +958,7 @@ func walkMessageChain(ctx context.Context, db *sql.DB, sessionID, leafID string)
 		leafID, sessionID, maxDepth,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("session: walk chain: %w", err)
+		return nil, fmt.Errorf("sqlitestore: walk chain: %w", err)
 	}
 	defer rows.Close()
 
@@ -954,19 +968,19 @@ func walkMessageChain(ctx context.Context, db *sql.DB, sessionID, leafID string)
 		var id string
 		var depth int
 		if err := rows.Scan(&id, &depth); err != nil {
-			return nil, fmt.Errorf("session: scan chain: %w", err)
+			return nil, fmt.Errorf("sqlitestore: scan chain: %w", err)
 		}
 		if _, dup := seen[id]; dup {
-			return nil, fmt.Errorf("session: message chain contains a cycle at %s", id)
+			return nil, fmt.Errorf("sqlitestore: message chain contains a cycle at %s", id)
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("session: iterate chain: %w", err)
+		return nil, fmt.Errorf("sqlitestore: iterate chain: %w", err)
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("session: current_leaf_id %s not found in session %s", leafID, sessionID)
+		return nil, fmt.Errorf("sqlitestore: current_leaf_id %s not found in session %s", leafID, sessionID)
 	}
 	return ids, nil
 }
@@ -1179,7 +1193,7 @@ func loadArtifactMetadata(ctx context.Context, db *sql.DB, ids []string) (map[st
 // HydrateArtifact fetches the full payload for an artifact-backed
 // block. Callers call it lazily when rendering (or when they need to
 // re-send the bytes to a provider).
-func (s *SQLiteStore) HydrateArtifact(ctx context.Context, artifactID string) ([]byte, string, error) {
+func (s *Store) HydrateArtifact(ctx context.Context, artifactID string) ([]byte, string, error) {
 	var (
 		data []byte
 		mime string
@@ -1189,10 +1203,10 @@ func (s *SQLiteStore) HydrateArtifact(ctx context.Context, artifactID string) ([
 		artifactID,
 	).Scan(&data, &mime)
 	if err == sql.ErrNoRows {
-		return nil, "", fmt.Errorf("session: artifact %q not found", artifactID)
+		return nil, "", fmt.Errorf("sqlitestore: artifact %q not found", artifactID)
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("session: hydrate artifact: %w", err)
+		return nil, "", fmt.Errorf("sqlitestore: hydrate artifact: %w", err)
 	}
 	return data, mime, nil
 }
@@ -1204,14 +1218,14 @@ func (s *SQLiteStore) HydrateArtifact(ctx context.Context, artifactID string) ([
 // Delete removes the session and cascades to messages and blocks via
 // foreign keys. Artifacts are intentionally NOT garbage-collected in
 // v1 — a future sweeper will handle orphans.
-func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
+func (s *Store) Delete(ctx context.Context, id string) error {
 	conn, tx, err := s.begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer releaseTx(conn, tx)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM stackllm_sessions WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("session: Delete: %w", err)
+		return fmt.Errorf("sqlitestore: Delete: %w", err)
 	}
 	return tx.Commit()
 }
@@ -1223,7 +1237,7 @@ const listSelectColumns = `id, name, project_path, model, state_json, created_at
 
 // scanSessionRow reads one stackllm_sessions row in the order
 // listSelectColumns declares. Used by List and ListPage.
-func scanSessionRow(rows *sql.Rows) (*Session, error) {
+func scanSessionRow(rows *sql.Rows) (*session.Session, error) {
 	var (
 		id               string
 		name             sql.NullString
@@ -1244,7 +1258,7 @@ func scanSessionRow(rows *sql.Rows) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{
+	return &session.Session{
 		ID:          id,
 		Name:        name.String,
 		ProjectPath: projectPath.String,
@@ -1259,19 +1273,19 @@ func scanSessionRow(rows *sql.Rows) (*Session, error) {
 // List returns every session with metadata populated and Messages
 // empty. Callers call Load on demand for the ones they want to read
 // in full.
-func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
+func (s *Store) List(ctx context.Context) ([]*session.Session, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+listSelectColumns+`
 		FROM stackllm_sessions
 		ORDER BY updated_at DESC`)
 	if err != nil {
-		return nil, fmt.Errorf("session: List: %w", err)
+		return nil, fmt.Errorf("sqlitestore: List: %w", err)
 	}
 	defer rows.Close()
-	var out []*Session
+	var out []*session.Session
 	for rows.Next() {
 		sess, err := scanSessionRow(rows)
 		if err != nil {
-			return nil, fmt.Errorf("session: List scan: %w", err)
+			return nil, fmt.Errorf("sqlitestore: List scan: %w", err)
 		}
 		out = append(out, sess)
 	}
@@ -1281,13 +1295,13 @@ func (s *SQLiteStore) List(ctx context.Context) ([]*Session, error) {
 // ListPage returns one page of sessions ordered by updated_at desc
 // plus the total row count (ignoring Limit/Offset). Implements
 // SessionPaginator. A negative Limit disables the cap; a zero Limit
-// uses DefaultListLimit. Negative Offset is treated as 0.
-func (s *SQLiteStore) ListPage(ctx context.Context, opts ListOptions) (ListResult, error) {
+// uses session.DefaultListLimit. Negative Offset is treated as 0.
+func (s *Store) ListPage(ctx context.Context, opts session.ListOptions) (session.ListResult, error) {
 	var total int
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stackllm_sessions`,
 	).Scan(&total); err != nil {
-		return ListResult{}, fmt.Errorf("session: ListPage count: %w", err)
+		return session.ListResult{}, fmt.Errorf("sqlitestore: ListPage count: %w", err)
 	}
 
 	offset := opts.Offset
@@ -1296,7 +1310,7 @@ func (s *SQLiteStore) ListPage(ctx context.Context, opts ListOptions) (ListResul
 	}
 	limit := opts.Limit
 	if limit == 0 {
-		limit = DefaultListLimit
+		limit = session.DefaultListLimit
 	}
 
 	q := `SELECT ` + listSelectColumns + `
@@ -1313,21 +1327,21 @@ func (s *SQLiteStore) ListPage(ctx context.Context, opts ListOptions) (ListResul
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return ListResult{}, fmt.Errorf("session: ListPage: %w", err)
+		return session.ListResult{}, fmt.Errorf("sqlitestore: ListPage: %w", err)
 	}
 	defer rows.Close()
-	out := []*Session{}
+	out := []*session.Session{}
 	for rows.Next() {
 		sess, err := scanSessionRow(rows)
 		if err != nil {
-			return ListResult{}, fmt.Errorf("session: ListPage scan: %w", err)
+			return session.ListResult{}, fmt.Errorf("sqlitestore: ListPage scan: %w", err)
 		}
 		out = append(out, sess)
 	}
 	if err := rows.Err(); err != nil {
-		return ListResult{}, err
+		return session.ListResult{}, err
 	}
-	return ListResult{Sessions: out, Total: total}, nil
+	return session.ListResult{Sessions: out, Total: total}, nil
 }
 
 // ---------------------------------------------------------------------
@@ -1340,7 +1354,7 @@ func (s *SQLiteStore) ListPage(ctx context.Context, opts ListOptions) (ListResul
 // to the new IDs. Blocks also get fresh IDs. Artifact rows are
 // REUSED (the new blocks point at the same artifact_id values) —
 // that's dedupe by design.
-func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newName string) (*Session, error) {
+func (s *Store) Fork(ctx context.Context, srcSessionID, atMessageID, newName string) (*session.Session, error) {
 	conn, tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -1350,14 +1364,14 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 	// Resolve the source chain from root to atMessageID.
 	chain, err := walkMessageChainTx(ctx, tx, srcSessionID, atMessageID)
 	if err != nil {
-		return nil, fmt.Errorf("session: Fork: resolve chain: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Fork: resolve chain: %w", err)
 	}
 
 	// Read source session metadata so we can copy name/model/project.
 	var (
-		srcName, srcProject, srcModel                sql.NullString
-		stateJSON                                    string
-		srcPromptTok, srcCompletionTok, srcTotalTok  sql.NullInt64
+		srcName, srcProject, srcModel               sql.NullString
+		stateJSON                                   string
+		srcPromptTok, srcCompletionTok, srcTotalTok sql.NullInt64
 	)
 	if err := tx.QueryRowContext(ctx, `
 		SELECT name, project_path, model, state_json,
@@ -1366,7 +1380,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 		srcSessionID,
 	).Scan(&srcName, &srcProject, &srcModel, &stateJSON,
 		&srcPromptTok, &srcCompletionTok, &srcTotalTok); err != nil {
-		return nil, fmt.Errorf("session: Fork: read source: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Fork: read source: %w", err)
 	}
 
 	now := time.Now().UTC()
@@ -1389,7 +1403,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 		formatTime(now),
 		srcPromptTok, srcCompletionTok, srcTotalTok,
 	); err != nil {
-		return nil, fmt.Errorf("session: Fork: insert session: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Fork: insert session: %w", err)
 	}
 	_ = srcName // reserved; newName takes precedence for the forked copy
 
@@ -1410,7 +1424,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 			SELECT role, model, duration_ms, parent_id, created_at
 			FROM stackllm_messages WHERE id = ?`, oldMsgID,
 		).Scan(&role, &model, &durationMS, &parentID, &createdAt); err != nil {
-			return nil, fmt.Errorf("session: Fork: read message %s: %w", oldMsgID, err)
+			return nil, fmt.Errorf("sqlitestore: Fork: read message %s: %w", oldMsgID, err)
 		}
 
 		newMsgID := conversation.NewID()
@@ -1429,7 +1443,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			newMsgID, newID, newParent, role, model, durationMS, createdAt,
 		); err != nil {
-			return nil, fmt.Errorf("session: Fork: insert message: %w", err)
+			return nil, fmt.Errorf("sqlitestore: Fork: insert message: %w", err)
 		}
 
 		// Copy all blocks. Keep seq order, reuse artifact_id.
@@ -1439,7 +1453,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 			       artifact_id, created_at
 			FROM stackllm_blocks WHERE message_id = ? ORDER BY seq`, oldMsgID)
 		if err != nil {
-			return nil, fmt.Errorf("session: Fork: read blocks: %w", err)
+			return nil, fmt.Errorf("sqlitestore: Fork: read blocks: %w", err)
 		}
 		type blockCopy struct {
 			seq                                                  int
@@ -1452,7 +1466,7 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 			var bc blockCopy
 			if err := blockRows.Scan(&bc.seq, &bc.typ, &bc.text, &bc.tcID, &bc.tname, &bc.targs, &bc.tisErr, &bc.mime, &bc.iurl, &bc.aid, &bc.createdAt); err != nil {
 				blockRows.Close()
-				return nil, fmt.Errorf("session: Fork: scan block: %w", err)
+				return nil, fmt.Errorf("sqlitestore: Fork: scan block: %w", err)
 			}
 			copies = append(copies, bc)
 		}
@@ -1483,14 +1497,14 @@ func (s *SQLiteStore) Fork(ctx context.Context, srcSessionID, atMessageID, newNa
 				bc.aid,
 				bc.createdAt.String,
 			); err != nil {
-				return nil, fmt.Errorf("session: Fork: insert block: %w", err)
+				return nil, fmt.Errorf("sqlitestore: Fork: insert block: %w", err)
 			}
 		}
 		lastNewID = newMsgID
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE stackllm_sessions SET current_leaf_id = ? WHERE id = ?`, lastNewID, newID); err != nil {
-		return nil, fmt.Errorf("session: Fork: update leaf: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Fork: update leaf: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1541,7 +1555,7 @@ func walkMessageChainTx(ctx context.Context, tx *sql.Tx, sessionID, leafID strin
 // messages are never deleted — subsequent Save calls append as
 // children of toMessageID, creating a sibling branch. Callers that
 // want to "return to" the original tip can Rewind there again.
-func (s *SQLiteStore) Rewind(ctx context.Context, sessionID, toMessageID string) error {
+func (s *Store) Rewind(ctx context.Context, sessionID, toMessageID string) error {
 	conn, tx, err := s.begin(ctx)
 	if err != nil {
 		return err
@@ -1557,9 +1571,9 @@ func (s *SQLiteStore) Rewind(ctx context.Context, sessionID, toMessageID string)
 		toMessageID, sessionID,
 	).Scan(&found); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("session: Rewind: message %s not in session %s", toMessageID, sessionID)
+			return fmt.Errorf("sqlitestore: Rewind: message %s not in session %s", toMessageID, sessionID)
 		}
-		return fmt.Errorf("session: Rewind: validate target: %w", err)
+		return fmt.Errorf("sqlitestore: Rewind: validate target: %w", err)
 	}
 
 	now := time.Now().UTC()
@@ -1567,7 +1581,7 @@ func (s *SQLiteStore) Rewind(ctx context.Context, sessionID, toMessageID string)
 		`UPDATE stackllm_sessions SET current_leaf_id = ?, updated_at = ? WHERE id = ?`,
 		toMessageID, formatTime(now), sessionID,
 	); err != nil {
-		return fmt.Errorf("session: Rewind: update leaf: %w", err)
+		return fmt.Errorf("sqlitestore: Rewind: update leaf: %w", err)
 	}
 	return tx.Commit()
 }
@@ -1577,7 +1591,7 @@ func (s *SQLiteStore) Rewind(ctx context.Context, sessionID, toMessageID string)
 // branch point. Empty slice if there are no children. Preview is the
 // first 80 characters of the first text-bearing block in each child
 // message.
-func (s *SQLiteStore) ListBranches(ctx context.Context, sessionID, referenceMessageID string) ([]BranchRef, error) {
+func (s *Store) ListBranches(ctx context.Context, sessionID, referenceMessageID string) ([]BranchRef, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, role, created_at
 		FROM stackllm_messages
@@ -1586,7 +1600,7 @@ func (s *SQLiteStore) ListBranches(ctx context.Context, sessionID, referenceMess
 		sessionID, referenceMessageID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("session: ListBranches: %w", err)
+		return nil, fmt.Errorf("sqlitestore: ListBranches: %w", err)
 	}
 	defer rows.Close()
 
@@ -1596,7 +1610,7 @@ func (s *SQLiteStore) ListBranches(ctx context.Context, sessionID, referenceMess
 			id, role, created string
 		)
 		if err := rows.Scan(&id, &role, &created); err != nil {
-			return nil, fmt.Errorf("session: ListBranches scan: %w", err)
+			return nil, fmt.Errorf("sqlitestore: ListBranches scan: %w", err)
 		}
 		refs = append(refs, BranchRef{
 			MessageID: id,
@@ -1619,7 +1633,7 @@ func (s *SQLiteStore) ListBranches(ctx context.Context, sessionID, referenceMess
 			refs[i].MessageID,
 		).Scan(&preview)
 		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("session: ListBranches preview: %w", err)
+			return nil, fmt.Errorf("sqlitestore: ListBranches preview: %w", err)
 		}
 		refs[i].Preview = truncatePreview(preview.String, 80)
 	}
@@ -1629,7 +1643,7 @@ func (s *SQLiteStore) ListBranches(ctx context.Context, sessionID, referenceMess
 // Search runs an FTS5 query. scopeSessionID may be empty to search
 // globally; blockTypes may be nil to search every text-bearing block
 // type. Results are ordered by FTS5 rank ascending (best first).
-func (s *SQLiteStore) Search(ctx context.Context, query string, scopeSessionID string, blockTypes []conversation.BlockType, limit int) ([]SearchHit, error) {
+func (s *Store) Search(ctx context.Context, query string, scopeSessionID string, blockTypes []conversation.BlockType, limit int) ([]SearchHit, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -1664,7 +1678,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, scopeSessionID s
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("session: Search: %w", err)
+		return nil, fmt.Errorf("sqlitestore: Search: %w", err)
 	}
 	defer rows.Close()
 	var hits []SearchHit
@@ -1735,7 +1749,7 @@ type jsonlExportedBlock struct {
 // every message in chain order. Artifact payloads are inlined as
 // base64 (or raw text for text/plain tool_result offloads) so the
 // export is fully self-contained.
-func (s *SQLiteStore) ExportJSONL(ctx context.Context, sessionID string, w io.Writer) error {
+func (s *Store) ExportJSONL(ctx context.Context, sessionID string, w io.Writer) error {
 	sess, err := s.Load(ctx, sessionID)
 	if err != nil {
 		return err
@@ -1757,7 +1771,7 @@ func (s *SQLiteStore) ExportJSONL(ctx context.Context, sessionID string, w io.Wr
 		Leaf:        leaf,
 	}
 	if err := writeJSONLine(w, header); err != nil {
-		return fmt.Errorf("session: Export: header: %w", err)
+		return fmt.Errorf("sqlitestore: Export: header: %w", err)
 	}
 
 	parentByID := make(map[string]string, len(sess.Messages))
@@ -1782,7 +1796,7 @@ func (s *SQLiteStore) ExportJSONL(ctx context.Context, sessionID string, w io.Wr
 			if b.ArtifactRef != nil {
 				data, mime, err := s.HydrateArtifact(ctx, b.ArtifactRef.ID)
 				if err != nil {
-					return fmt.Errorf("session: Export: hydrate %s: %w", b.ArtifactRef.ID, err)
+					return fmt.Errorf("sqlitestore: Export: hydrate %s: %w", b.ArtifactRef.ID, err)
 				}
 				eb.ArtifactMIME = mime
 				// Preserve text payloads as raw text so consumers of
@@ -1800,7 +1814,7 @@ func (s *SQLiteStore) ExportJSONL(ctx context.Context, sessionID string, w io.Wr
 			exported.Blocks = append(exported.Blocks, eb)
 		}
 		if err := writeJSONLine(w, exported); err != nil {
-			return fmt.Errorf("session: Export: message %s: %w", msg.ID, err)
+			return fmt.Errorf("sqlitestore: Export: message %s: %w", msg.ID, err)
 		}
 	}
 	return nil
@@ -1810,19 +1824,19 @@ func (s *SQLiteStore) ExportJSONL(ctx context.Context, sessionID string, w io.Wr
 // A fresh session ID is always allocated so re-importing the same
 // file is safe; the original ID is discarded. Returns the new
 // session ID.
-func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, error) {
+func (s *Store) ImportJSONL(ctx context.Context, r io.Reader) (string, error) {
 	dec := json.NewDecoder(r)
 
 	// Peek the header first. We keep the raw header fields and
-	// reconstruct a *Session, then call Save on a per-message basis
+	// reconstruct a *session.Session, then call Save on a per-message basis
 	// via a dedicated low-level path so we can preserve ArtifactRef
 	// metadata where present.
 	var first map[string]any
 	if err := dec.Decode(&first); err != nil {
-		return "", fmt.Errorf("session: Import: header: %w", err)
+		return "", fmt.Errorf("sqlitestore: Import: header: %w", err)
 	}
 	if first["kind"] != "session_header" {
-		return "", fmt.Errorf("session: Import: expected session_header, got %v", first["kind"])
+		return "", fmt.Errorf("sqlitestore: Import: expected session_header, got %v", first["kind"])
 	}
 
 	newID := conversation.NewID()
@@ -1840,7 +1854,7 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 	stateMap, _ := first["state"].(map[string]any)
 	stateJSON, err := marshalState(stateMap)
 	if err != nil {
-		return "", fmt.Errorf("session: Import: state: %w", err)
+		return "", fmt.Errorf("sqlitestore: Import: state: %w", err)
 	}
 	// Import does not carry usage forward — the imported JSONL format
 	// pre-dates LastUsage and the three columns stay NULL until the
@@ -1861,7 +1875,7 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 		formatTime(now),
 		formatTime(now),
 	); err != nil {
-		return "", fmt.Errorf("session: Import: insert session: %w", err)
+		return "", fmt.Errorf("sqlitestore: Import: insert session: %w", err)
 	}
 
 	// Walk messages. The exported parent_id values reference the
@@ -1872,10 +1886,10 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 	for dec.More() {
 		var msg jsonlMessage
 		if err := dec.Decode(&msg); err != nil {
-			return "", fmt.Errorf("session: Import: decode message: %w", err)
+			return "", fmt.Errorf("sqlitestore: Import: decode message: %w", err)
 		}
 		if msg.Kind != "message" {
-			return "", fmt.Errorf("session: Import: expected message, got %q", msg.Kind)
+			return "", fmt.Errorf("sqlitestore: Import: expected message, got %q", msg.Kind)
 		}
 
 		newMsgID := conversation.NewID()
@@ -1901,7 +1915,7 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 			) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			newMsgID, newID, parentNS, string(msg.Role), nullString(msg.Model), durationMS, formatTime(createdAt),
 		); err != nil {
-			return "", fmt.Errorf("session: Import: insert message: %w", err)
+			return "", fmt.Errorf("sqlitestore: Import: insert message: %w", err)
 		}
 
 		for seq, eb := range msg.Blocks {
@@ -1913,7 +1927,7 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 			if eb.ArtifactB64 != "" {
 				data, err := base64.StdEncoding.DecodeString(eb.ArtifactB64)
 				if err != nil {
-					return "", fmt.Errorf("session: Import: decode artifact bytes: %w", err)
+					return "", fmt.Errorf("sqlitestore: Import: decode artifact bytes: %w", err)
 				}
 				switch b.Type {
 				case conversation.BlockImage:
@@ -1937,14 +1951,14 @@ func (s *SQLiteStore) ImportJSONL(ctx context.Context, r io.Reader) (string, err
 			}
 			b.ArtifactRef = nil
 			if err := insertBlock(ctx, tx, newMsgID, seq, &b, now); err != nil {
-				return "", fmt.Errorf("session: Import: insert block: %w", err)
+				return "", fmt.Errorf("sqlitestore: Import: insert block: %w", err)
 			}
 		}
 		lastNew = newMsgID
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE stackllm_sessions SET current_leaf_id = ? WHERE id = ?`, lastNew, newID); err != nil {
-		return "", fmt.Errorf("session: Import: set leaf: %w", err)
+		return "", fmt.Errorf("sqlitestore: Import: set leaf: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err

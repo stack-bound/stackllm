@@ -1,0 +1,27 @@
+# .workFlow.yaml — per-repository WorkFlow settings.
+# Created by the wf (WorkFlow) CLI. Learn more: https://github.com/stack-bound/workflow
+# All fields are optional.
+
+# Default base branch for new workspaces in this repo (detected at init; edit freely).
+base: master
+
+# Default editor for "wf edit" in this repo (a catalog or custom id; see: wf edit --list).
+# Set it from the picker, or by hand. autolaunch: true opens it without the picker.
+# default_ide: goland
+# autolaunch: false
+
+# Where worktrees for this repo are created.
+# Default: a sibling directory "<repo>_worktrees".
+# worktree_dir: ../myrepo_worktrees
+
+# Commands run (via sh -c) inside each new worktree after it is created.
+setup:
+  # - npm install
+
+# Repo-root-relative files copied into each new worktree.
+copy:
+  # - .env.example
+
+# Repo-root-relative files symlinked into each new worktree.
+symlink:
+  # - .env

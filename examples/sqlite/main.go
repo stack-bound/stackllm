@@ -8,7 +8,7 @@
 //  1. the parent application opens *sql.DB itself (modernc.org/sqlite,
 //     no CGO) with whichever pragmas it wants
 //  2. the parent app runs its own schema migrations on that DB
-//  3. the parent app hands the same *sql.DB to session.NewSQLiteStore,
+//  3. the parent app hands the same *sql.DB to sqlitestore.New,
 //     which runs stackllm's migrations side-by-side — all stackllm
 //     tables are prefixed `stackllm_` so nothing collides with
 //     parent-app tables
@@ -17,13 +17,13 @@
 //     into host application state with zero extra plumbing
 //  5. the full agent turn (user prompt → model → tool_use →
 //     tool_result → final text) is persisted through the same
-//     SQLiteStore, including blocks, artifacts, and FTS5 indexing
+//     sqlitestore.Store, including blocks, artifacts, and FTS5 indexing
 //
 // This is an integration example, not a test fixture. It runs an
 // actual agent turn against whichever provider you have configured as
 // your profile default (or via the interactive setup on first run).
 // For a no-network-required unit test of the store itself, see
-// session/sqlite_test.go.
+// session/sqlitestore/sqlite_test.go.
 //
 // Usage:
 //
@@ -45,6 +45,7 @@ import (
 	"github.com/stack-bound/stackllm/profile"
 	"github.com/stack-bound/stackllm/provider"
 	"github.com/stack-bound/stackllm/session"
+	"github.com/stack-bound/stackllm/session/sqlitestore"
 	"github.com/stack-bound/stackllm/tools"
 
 	_ "modernc.org/sqlite"
@@ -81,7 +82,7 @@ func main() {
 
 	// 2. Open *sql.DB directly. The example sets the "durable but
 	//    fast" pragma profile in its own DSN. stackllm's
-	//    NewSQLiteStore will additionally flip journal_mode=WAL at
+	//    sqlitestore.New will additionally flip journal_mode=WAL at
 	//    bootstrap and apply foreign_keys / busy_timeout per stackllm
 	//    transaction — but parent-app queries against this handle
 	//    only see the DSN-level pragmas, which is why the example
@@ -114,12 +115,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4. Hand the same connection to stackllm. NewSQLiteStore runs
+	// 4. Hand the same connection to stackllm. sqlitestore.New runs
 	//    stackllm's migrations against this DB, creating every
 	//    stackllm_* table needed.
-	store, err := session.NewSQLiteStore(db)
+	store, err := sqlitestore.New(db)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "NewSQLiteStore:", err)
+		fmt.Fprintln(os.Stderr, "sqlitestore.New:", err)
 		os.Exit(1)
 	}
 

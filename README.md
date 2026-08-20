@@ -137,10 +137,12 @@ All five share the same `Complete(ctx, Request)` surface and return a streaming 
 
 ## Sessions
 
-`session.SessionStore` is the persistence interface. `InMemoryStore` and `SQLiteStore` both ship in the box; embedders can implement their own (Redis, Postgres, etc.) when they need to.
+`session.SessionStore` is the persistence interface. `InMemoryStore` ships in the `session` package; the durable SQLite-backed `sqlitestore.Store` lives in the `session/sqlitestore` subpackage so embedders that bring their own store (Redis, Postgres, SQL Server, etc.) never link `modernc.org/sqlite` into their binary — the `session` package itself is guaranteed driver-free.
 
 ```go
-store, _ := session.OpenSQLiteStore(session.SQLiteConfig{AppName: "myapp"})
+import "github.com/stack-bound/stackllm/session/sqlitestore"
+
+store, _ := sqlitestore.Open(sqlitestore.Config{AppName: "myapp"})
 defer store.Close()
 
 sess := session.New()
@@ -161,7 +163,7 @@ type SessionPaginator interface {
 }
 ```
 
-Both `InMemoryStore` and `SQLiteStore` implement it. Feature-detect via type assertion so custom stores stay free to omit it:
+Both `InMemoryStore` and `sqlitestore.Store` implement it. Feature-detect via type assertion so custom stores stay free to omit it:
 
 ```go
 if p, ok := store.(session.SessionPaginator); ok {
@@ -206,7 +208,7 @@ Runnable examples live in `examples/`.
 | `examples/simple` | Minimal agent with `greet` and `add` tools. Walks the user through provider login and model selection on first run, then uses the persisted default on subsequent runs. |
 | `examples/copilot` | Direct Copilot wiring without the manager — shows the two-phase GitHub device flow and caching token source. |
 | `examples/tui` | Full Bubbletea TUI agent. Streams tokens as they arrive, renders tool calls and results inline, supports Ctrl+V image paste (inserts a `[Image #N]` placeholder and attaches a `BlockImage` on send), and supports slash commands: `/models` to switch provider/model at runtime (with recently-used models surfaced first), `/new` to start a fresh session. Uses the persisted default or falls back to `OPENAI_API_KEY`. |
-| `examples/sqlite` | Shared-DB demo for `session.SQLiteStore`: opens a single SQLite file, runs a parent-app migration (`memories` table), hands the same `*sql.DB` to `session.NewSQLiteStore`, saves a conversation, and queries both namespaces to prove coexistence. No network calls — usable as a CI smoke test. |
+| `examples/sqlite` | Shared-DB demo for `sqlitestore.Store`: opens a single SQLite file, runs a parent-app migration (`memories` table), hands the same `*sql.DB` to `sqlitestore.New`, saves a conversation, and queries both namespaces to prove coexistence. No network calls — usable as a CI smoke test. |
 | `examples/web` | Browser-only embedding. Serves `web.ManagedHandler` under `/api/*` and a minimal single-page UI at `/` that drives provider login (API keys, Ollama URL, Copilot device flow, "Sign in with ChatGPT" for OpenAI), model selection, default setting, and streaming chat — all over HTTP with no TUI. The ChatGPT browser/PKCE flow is deliberately CLI-only because its OAuth callback lands on the user's localhost, not the server's — remote-hosted web UIs should use the device-code flow (which works regardless of where the server lives). |
 
 Run any of them with `go run ./examples/<name>`.
