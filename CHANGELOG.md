@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.5.1] - 2026-08-20 (93.81%)
+### Changed
+- Improved test coverage from 71.56% to 93.81%
+- Formatted all source files with gofmt
+### Fixed
+- `sqlitestore.ImportJSONL` of an export with no messages now stores a NULL leaf pointer instead of an empty string, so the imported session loads instead of failing with "current_leaf_id not found"
+- OAuth web-flow logins (OpenAI and Codex) now drain the local callback server gracefully on completion, so the browser reliably receives the result page instead of an occasional connection reset
+
 ## [0.5.0] - 2026-08-20 (71.32%)
 ### Changed
 - BREAKING: moved the SQLite-backed session store out of `session` into the new `session/sqlitestore` subpackage — `session.OpenSQLiteStore`/`session.NewSQLiteStore`/`session.SQLiteStore`/`session.SQLiteConfig` are now `sqlitestore.Open`/`sqlitestore.New`/`sqlitestore.Store`/`sqlitestore.Config`. Importing `session` for the `SessionStore` interface no longer links `modernc.org/sqlite` into the embedder's binary; the `session` package is now guaranteed driver-free
