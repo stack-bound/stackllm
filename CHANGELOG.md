@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.5.0] - 2026-08-20 (71.32%)
+### Changed
+- BREAKING: moved the SQLite-backed session store out of `session` into the new `session/sqlitestore` subpackage — `session.OpenSQLiteStore`/`session.NewSQLiteStore`/`session.SQLiteStore`/`session.SQLiteConfig` are now `sqlitestore.Open`/`sqlitestore.New`/`sqlitestore.Store`/`sqlitestore.Config`. Importing `session` for the `SessionStore` interface no longer links `modernc.org/sqlite` into the embedder's binary; the `session` package is now guaranteed driver-free
+### Fixed
+- `agent.Run` no longer mutates the shared Agent's hooks per step, making concurrent `Run` calls on one Agent safe — each run now snapshots the options and emits to its own event channel without cross-wiring. The concurrency contract is documented on `Agent`, `Run`, `SetProvider`, and `SetModel`
+
 ## [0.4.2] - 2026-08-20 (71.32%)
 ### Added
 - Added in new OpenAI models
