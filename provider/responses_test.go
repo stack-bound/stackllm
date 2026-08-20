@@ -603,7 +603,9 @@ func TestMessagesToInput(t *testing.T) {
 	want := []map[string]any{
 		{
 			"type": "message",
-			"role": "system",
+			// System prompts travel as "developer" on /responses: the
+			// ChatGPT Codex backend 400s on role "system".
+			"role": "developer",
 			"content": []map[string]any{
 				{"type": "input_text", "text": "you are helpful"},
 			},

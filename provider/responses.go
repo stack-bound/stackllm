@@ -106,7 +106,9 @@ func (p *OpenAIProvider) buildResponsesBody(req Request) (map[string]any, error)
 // within each message and across the conversation.
 //
 // Mapping:
-//   - system / user BlockText    → {"type":"message","role":"...",
+//   - system BlockText           → {"type":"message","role":"developer",
+//                                    "content":[{"type":"input_text","text":...}]}
+//   - user BlockText             → {"type":"message","role":"user",
 //                                    "content":[{"type":"input_text","text":...}]}
 //   - user BlockImage            → {"type":"message","role":"user",
 //                                    "content":[{"type":"input_image","image_url":...}]}
@@ -123,10 +125,15 @@ func messagesToInput(msgs []conversation.Message) ([]map[string]any, error) {
 	for _, m := range msgs {
 		switch m.Role {
 		case conversation.RoleSystem:
+			// The Responses API's canonical instruction role is
+			// "developer" ("system" is a legacy alias on api.openai.com).
+			// The ChatGPT Codex backend rejects system items outright
+			// ("System messages are not allowed") but accepts developer —
+			// it's what the official Codex CLI sends.
 			text := m.TextContent()
 			out = append(out, map[string]any{
 				"type": "message",
-				"role": "system",
+				"role": "developer",
 				"content": []map[string]any{
 					{"type": "input_text", "text": text},
 				},
