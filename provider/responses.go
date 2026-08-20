@@ -42,7 +42,7 @@ func (p *OpenAIProvider) completeResponses(ctx context.Context, req Request) (<-
 
 	go func() {
 		defer close(events)
-		p.doStreamingPOST(ctx, url, jsonBody, events, p.readResponsesSSE)
+		p.doStreamingPOST(ctx, url, jsonBody, nil, events, p.readResponsesSSE)
 	}()
 
 	return events, nil

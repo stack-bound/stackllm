@@ -94,9 +94,12 @@ func TestWithTemperatureAndMaxTokens_ReachWire(t *testing.T) {
 	if !ok || temp != 0.55 {
 		t.Errorf("body temperature = %v, want 0.55", gotBody["temperature"])
 	}
-	maxTok, ok := gotBody["max_tokens"].(float64)
+	maxTok, ok := gotBody["max_completion_tokens"].(float64)
 	if !ok || maxTok != 321 {
-		t.Errorf("body max_tokens = %v, want 321", gotBody["max_tokens"])
+		t.Errorf("body max_completion_tokens = %v, want 321", gotBody["max_completion_tokens"])
+	}
+	if _, present := gotBody["max_tokens"]; present {
+		t.Errorf("body max_tokens = %v, want absent (max_completion_tokens is the primary parameter)", gotBody["max_tokens"])
 	}
 }
 
@@ -140,5 +143,8 @@ func TestWithoutTemperatureAndMaxTokens_OmittedFromWire(t *testing.T) {
 	}
 	if _, present := gotBody["max_tokens"]; present {
 		t.Error("max_tokens should be omitted when WithMaxTokens is not used")
+	}
+	if _, present := gotBody["max_completion_tokens"]; present {
+		t.Error("max_completion_tokens should be omitted when WithMaxTokens is not used")
 	}
 }

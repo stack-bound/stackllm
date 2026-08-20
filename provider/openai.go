@@ -165,6 +165,19 @@ func (p *OpenAIProvider) completeChat(ctx context.Context, req Request) (<-chan 
 		return nil, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
+	// Older models/api-versions reject max_completion_tokens; prepare an
+	// identical body carrying max_tokens instead so doStreamingPOST can
+	// retry once if the backend returns an unsupported-parameter 400.
+	var fallbackBody []byte
+	if req.MaxTokens > 0 {
+		delete(body, "max_completion_tokens")
+		body["max_tokens"] = req.MaxTokens
+		fallbackBody, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("provider: marshal fallback request: %w", err)
+		}
+	}
+
 	url := p.cfg.BaseURL + "/chat/completions"
 	if p.cfg.APIVersion != "" {
 		url += "?api-version=" + p.cfg.APIVersion
@@ -174,7 +187,7 @@ func (p *OpenAIProvider) completeChat(ctx context.Context, req Request) (<-chan 
 
 	go func() {
 		defer close(events)
-		p.doStreamingPOST(ctx, url, jsonBody, events, p.readChatSSE)
+		p.doStreamingPOST(ctx, url, jsonBody, fallbackBody, events, p.readChatSSE)
 	}()
 
 	return events, nil
@@ -300,7 +313,11 @@ func (p *OpenAIProvider) buildRequestBody(req Request) map[string]any {
 	}
 
 	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
+		// Newer OpenAI/Azure models reject max_tokens with a 400
+		// unsupported_parameter error; max_completion_tokens is the
+		// replacement. completeChat prepares a max_tokens fallback body
+		// for older models that reject this parameter instead.
+		body["max_completion_tokens"] = req.MaxTokens
 	}
 	if req.Temperature != nil {
 		body["temperature"] = *req.Temperature
@@ -458,7 +475,12 @@ type sseReader func(io.Reader, chan<- Event)
 // doStreamingPOST POSTs body to url, retries on 429/5xx, and on success
 // hands the response body to reader for SSE parsing. Errors are emitted
 // to events as Event{Type: EventTypeError}.
-func (p *OpenAIProvider) doStreamingPOST(ctx context.Context, url string, body []byte, events chan<- Event, reader sseReader) {
+//
+// fallbackBody, when non-nil, is an alternate request body swapped in
+// once if the backend answers 400 rejecting the max_completion_tokens
+// parameter (older models/api-versions still expect max_tokens). Pass
+// nil for endpoints that don't send that parameter.
+func (p *OpenAIProvider) doStreamingPOST(ctx context.Context, url string, body, fallbackBody []byte, events chan<- Event, reader sseReader) {
 	var lastErr error
 	for attempt := 0; attempt < p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -493,6 +515,15 @@ func (p *OpenAIProvider) doStreamingPOST(ctx context.Context, url string, body [
 		if resp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if fallbackBody != nil && resp.StatusCode == http.StatusBadRequest && isUnsupportedMaxCompletionTokens(respBody) {
+				// The backend rejected max_completion_tokens; swap in
+				// the max_tokens body and retry. The swap is one-shot
+				// and does not consume a retry attempt.
+				body = fallbackBody
+				fallbackBody = nil
+				attempt--
+				continue
+			}
 			events <- Event{Type: EventTypeError, Err: fmt.Errorf("provider: status %d: %s", resp.StatusCode, respBody)}
 			return
 		}
@@ -503,6 +534,23 @@ func (p *OpenAIProvider) doStreamingPOST(ctx context.Context, url string, body [
 	}
 
 	events <- Event{Type: EventTypeError, Err: fmt.Errorf("provider: max retries exceeded: %w", lastErr)}
+}
+
+// isUnsupportedMaxCompletionTokens reports whether a 400 response body
+// indicates the backend rejected the max_completion_tokens parameter.
+// OpenAI-style backends answer with code "unsupported_parameter"
+// ("Unsupported parameter: 'max_completion_tokens' is not supported
+// with this model. Use 'max_tokens' instead."); older Azure
+// api-versions phrase it as "Unrecognized request argument supplied:
+// max_completion_tokens".
+func isUnsupportedMaxCompletionTokens(body []byte) bool {
+	if !bytes.Contains(body, []byte("max_completion_tokens")) {
+		return false
+	}
+	lower := bytes.ToLower(body)
+	return bytes.Contains(lower, []byte("unsupported")) ||
+		bytes.Contains(lower, []byte("unrecognized")) ||
+		bytes.Contains(lower, []byte("unknown"))
 }
 
 type toolCallAcc struct {
