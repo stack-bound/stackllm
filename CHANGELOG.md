@@ -2,6 +2,10 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.4.2] - 2026-08-20 (71.32%)
+### Added
+- Added in new OpenAI models
+
 ## [0.4.1] - 2026-04-19
 ### Added
 - Added pagination for sessions
