@@ -2,6 +2,10 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.6.0] - 2026-09-21 (93.83%)
+### Added
+- Reasoning effort control: `provider.Config.ReasoningEffort` (default for every call), `provider.Request.ReasoningEffort` (per-call override) and `agent.WithReasoningEffort(level)`, with the `provider.ReasoningEffortNone|Minimal|Low|Medium|High` constants. Sent as `reasoning.effort` on `/responses` and `reasoning_effort` on `/chat/completions`; omitted when unset, so the model keeps its own default
+
 ## [0.5.2] - 2026-08-20 (93.81%)
 ### Fixed
 - OpenAI/Azure chat completions now send max_completion_tokens (with automatic max_tokens fallback for older models), fixing 400 unsupported_parameter errors on newer models
