@@ -655,3 +655,72 @@ func TestReadResponsesSSE_FailedEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildResponsesBody_ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	msgs := []conversation.Message{userText("hi")}
+
+	t.Run("config default reaches the body", func(t *testing.T) {
+		t.Parallel()
+		p := New(Config{Model: "m", TokenSource: auth.NewStatic("k"), ReasoningEffort: ReasoningEffortNone})
+		body, err := p.buildResponsesBody(Request{Messages: msgs})
+		if err != nil {
+			t.Fatalf("buildResponsesBody: %v", err)
+		}
+		reasoning, ok := body["reasoning"].(map[string]any)
+		if !ok {
+			t.Fatalf("reasoning = %+v, want a map", body["reasoning"])
+		}
+		if reasoning["effort"] != ReasoningEffortNone {
+			t.Errorf("reasoning.effort = %v, want %q", reasoning["effort"], ReasoningEffortNone)
+		}
+	})
+
+	t.Run("request overrides the config default", func(t *testing.T) {
+		t.Parallel()
+		p := New(Config{Model: "m", TokenSource: auth.NewStatic("k"), ReasoningEffort: ReasoningEffortHigh})
+		body, err := p.buildResponsesBody(Request{Messages: msgs, ReasoningEffort: ReasoningEffortLow})
+		if err != nil {
+			t.Fatalf("buildResponsesBody: %v", err)
+		}
+		reasoning, _ := body["reasoning"].(map[string]any)
+		if reasoning["effort"] != ReasoningEffortLow {
+			t.Errorf("reasoning.effort = %v, want %q", reasoning["effort"], ReasoningEffortLow)
+		}
+	})
+
+	t.Run("omitted when neither asks for a level", func(t *testing.T) {
+		t.Parallel()
+		p := New(Config{Model: "m", TokenSource: auth.NewStatic("k")})
+		body, err := p.buildResponsesBody(Request{Messages: msgs})
+		if err != nil {
+			t.Fatalf("buildResponsesBody: %v", err)
+		}
+		if _, present := body["reasoning"]; present {
+			t.Errorf("reasoning = %v, want absent so the model keeps its own default", body["reasoning"])
+		}
+	})
+}
+
+func TestBuildRequestBody_ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	msgs := []conversation.Message{userText("hi")}
+
+	p := New(Config{Model: "m", TokenSource: auth.NewStatic("k"), ReasoningEffort: ReasoningEffortMinimal})
+	body := p.buildRequestBody(Request{Messages: msgs})
+	if body["reasoning_effort"] != ReasoningEffortMinimal {
+		t.Errorf("reasoning_effort = %v, want %q", body["reasoning_effort"], ReasoningEffortMinimal)
+	}
+
+	body = p.buildRequestBody(Request{Messages: msgs, ReasoningEffort: ReasoningEffortMedium})
+	if body["reasoning_effort"] != ReasoningEffortMedium {
+		t.Errorf("reasoning_effort = %v, want %q", body["reasoning_effort"], ReasoningEffortMedium)
+	}
+
+	plain := New(Config{Model: "m", TokenSource: auth.NewStatic("k")})
+	if body := plain.buildRequestBody(Request{Messages: msgs}); body["reasoning_effort"] != nil {
+		t.Errorf("reasoning_effort = %v, want absent", body["reasoning_effort"])
+	}
+}

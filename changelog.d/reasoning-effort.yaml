@@ -1,0 +1,16 @@
+deployment:
+  - ""
+added:
+  - "Reasoning effort control: `provider.Config.ReasoningEffort` (default for every call), `provider.Request.ReasoningEffort` (per-call override) and `agent.WithReasoningEffort(level)`, with the `provider.ReasoningEffortNone|Minimal|Low|Medium|High` constants. Sent as `reasoning.effort` on `/responses` and `reasoning_effort` on `/chat/completions`; omitted when unset, so the model keeps its own default"
+changed:
+  - ""
+deprecated:
+  - ""
+removed:
+  - ""
+fixed:
+  - ""
+security:
+  - ""
+yanked:
+  - ""

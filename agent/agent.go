@@ -104,12 +104,13 @@ func (a *Agent) step(ctx context.Context, msgs []conversation.Message, o *option
 	}
 
 	req := provider.Request{
-		Model:       o.model,
-		Messages:    msgs,
-		Tools:       o.registry.Definitions(),
-		MaxTokens:   o.maxTokens,
-		Temperature: o.temperature,
-		Stream:      true,
+		Model:           o.model,
+		Messages:        msgs,
+		Tools:           o.registry.Definitions(),
+		MaxTokens:       o.maxTokens,
+		Temperature:     o.temperature,
+		ReasoningEffort: o.reasoningEffort,
+		Stream:          true,
 	}
 
 	start := time.Now()

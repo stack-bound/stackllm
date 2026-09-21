@@ -40,6 +40,14 @@ type Config struct {
 	// /responses backends treat it as an optional system prompt.
 	Instructions string
 
+	// ReasoningEffort is the default reasoning effort for every call,
+	// one of the provider.ReasoningEffort* levels. A Request may
+	// override it per call; empty in both leaves the field off the wire
+	// so the model keeps its own default. Sent as
+	// body["reasoning"]["effort"] on /responses and as
+	// body["reasoning_effort"] on /chat/completions.
+	ReasoningEffort string
+
 	// DisableStore, when true, emits body["store"] = false on every
 	// Responses API call. Ignored by /chat/completions. The ChatGPT
 	// Codex endpoint requires store=false for OAuth tokens and
@@ -140,6 +148,16 @@ func New(cfg Config) *OpenAIProvider {
 		}
 	}
 	return &OpenAIProvider{cfg: cfg}
+}
+
+// reasoningEffort resolves the effort for one call: an explicit request
+// value wins over the provider default, and an empty result means the
+// field is left off the wire.
+func (p *OpenAIProvider) reasoningEffort(req Request) string {
+	if req.ReasoningEffort != "" {
+		return req.ReasoningEffort
+	}
+	return p.cfg.ReasoningEffort
 }
 
 // Complete makes a streaming completion request and returns a channel of events.
@@ -321,6 +339,9 @@ func (p *OpenAIProvider) buildRequestBody(req Request) map[string]any {
 	}
 	if req.Temperature != nil {
 		body["temperature"] = *req.Temperature
+	}
+	if effort := p.reasoningEffort(req); effort != "" {
+		body["reasoning_effort"] = effort
 	}
 
 	// Convert tools to OpenAI format.

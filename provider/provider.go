@@ -54,6 +54,28 @@ const (
 	EndpointResponses       = "/responses"
 )
 
+// Reasoning effort levels for OpenAI reasoning models (the gpt-5 family
+// and the o-series). The level decides how long the model thinks before
+// it answers: ReasoningEffortNone skips thinking altogether and is what
+// a latency-sensitive caller wants, while ReasoningEffortHigh can spend
+// tens of seconds on one turn. Omitting the effort leaves the model on
+// its own default, which is several seconds of thinking on every turn
+// for the gpt-5 family.
+//
+// Not every model accepts every level — gpt-5 takes "minimal" but not
+// "xhigh", gpt-5.6 the other way round — and a level the model does not
+// support comes back as a 400 from the provider naming the ones it does,
+// rather than being silently ignored.
+const (
+	ReasoningEffortNone    = "none"
+	ReasoningEffortMinimal = "minimal" // gpt-5 / gpt-5.1 era only
+	ReasoningEffortLow     = "low"
+	ReasoningEffortMedium  = "medium"
+	ReasoningEffortHigh    = "high"
+	ReasoningEffortXHigh   = "xhigh" // gpt-5.6 onwards
+	ReasoningEffortMax     = "max"   // gpt-5.6 onwards
+)
+
 // ToolCall is an alias for conversation.ToolCall.
 type ToolCall = conversation.ToolCall
 
@@ -90,6 +112,11 @@ type Request struct {
 	MaxTokens   int
 	Temperature *float64 // nil means use provider default
 	Stream      bool     // always true in practice; kept for testing
+
+	// ReasoningEffort is one of the ReasoningEffort* levels. Empty falls
+	// back to Config.ReasoningEffort, and an empty config leaves the
+	// field off the wire so the model keeps its own default.
+	ReasoningEffort string
 }
 
 // ModelMeta describes one model returned by a provider's /models endpoint.

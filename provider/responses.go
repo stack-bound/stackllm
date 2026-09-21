@@ -81,6 +81,13 @@ func (p *OpenAIProvider) buildResponsesBody(req Request) (map[string]any, error)
 		body["temperature"] = *req.Temperature
 	}
 
+	// The Responses API nests the effort under "reasoning". Left off the
+	// wire when neither the request nor the config asked for a level, so
+	// the model keeps its own default.
+	if effort := p.reasoningEffort(req); effort != "" {
+		body["reasoning"] = map[string]any{"effort": effort}
+	}
+
 	if len(req.Tools) > 0 {
 		oaiTools := make([]map[string]any, len(req.Tools))
 		for i, t := range req.Tools {

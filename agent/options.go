@@ -6,12 +6,13 @@ import "github.com/stack-bound/stackllm/tools"
 type Option func(*options)
 
 type options struct {
-	maxSteps    int
-	model       string
-	temperature *float64
-	maxTokens   int
-	hooks       Hooks
-	registry    *tools.Registry
+	maxSteps        int
+	model           string
+	temperature     *float64
+	maxTokens       int
+	reasoningEffort string
+	hooks           Hooks
+	registry        *tools.Registry
 }
 
 func defaultOptions() options {
@@ -39,6 +40,16 @@ func WithTemperature(t float64) Option {
 // WithMaxTokens sets the maximum output tokens.
 func WithMaxTokens(n int) Option {
 	return func(o *options) { o.maxTokens = n }
+}
+
+// WithReasoningEffort sets how hard a reasoning model thinks before it
+// answers, as one of the provider.ReasoningEffort* levels.
+// provider.ReasoningEffortNone skips thinking, which is what a
+// latency-sensitive caller wants; unset leaves the model on its own
+// default, which for the gpt-5 family is several seconds of thinking on
+// every turn.
+func WithReasoningEffort(effort string) Option {
+	return func(o *options) { o.reasoningEffort = effort }
 }
 
 // WithHooks sets the agent hooks.

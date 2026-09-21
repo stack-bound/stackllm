@@ -148,3 +148,111 @@ func TestWithoutTemperatureAndMaxTokens_OmittedFromWire(t *testing.T) {
 		t.Error("max_completion_tokens should be omitted when WithMaxTokens is not used")
 	}
 }
+
+// TestWithReasoningEffort_ReachesWire pins the option all the way to the
+// JSON body on both wire formats: /responses nests the level under
+// "reasoning", chat completions sends it flat as "reasoning_effort", and
+// leaving the option unset keeps the field off the wire entirely so the
+// model applies its own default.
+func TestWithReasoningEffort_ReachesWire(t *testing.T) {
+	t.Parallel()
+
+	const responsesSSE = "event: response.output_item.added\n" +
+		"data: {\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"output_index\":0,\"delta\":\"ok\"}\n\n" +
+		"event: response.output_item.done\n" +
+		"data: {\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"response\":{}}\n\n"
+	const chatSSE = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"
+
+	cases := []struct {
+		name     string
+		endpoint string
+		sse      string
+		opts     []Option
+		// check inspects the body the backend received.
+		check func(t *testing.T, body map[string]any)
+	}{
+		{
+			name:     "responses nests the effort",
+			endpoint: provider.EndpointResponses,
+			sse:      responsesSSE,
+			opts:     []Option{WithReasoningEffort(provider.ReasoningEffortNone)},
+			check: func(t *testing.T, body map[string]any) {
+				reasoning, ok := body["reasoning"].(map[string]any)
+				if !ok {
+					t.Fatalf("body reasoning = %+v, want a map", body["reasoning"])
+				}
+				if reasoning["effort"] != provider.ReasoningEffortNone {
+					t.Errorf("body reasoning.effort = %v, want %q", reasoning["effort"], provider.ReasoningEffortNone)
+				}
+			},
+		},
+		{
+			name:     "chat completions sends it flat",
+			endpoint: provider.EndpointChatCompletions,
+			sse:      chatSSE,
+			opts:     []Option{WithReasoningEffort(provider.ReasoningEffortLow)},
+			check: func(t *testing.T, body map[string]any) {
+				if body["reasoning_effort"] != provider.ReasoningEffortLow {
+					t.Errorf("body reasoning_effort = %v, want %q", body["reasoning_effort"], provider.ReasoningEffortLow)
+				}
+			},
+		},
+		{
+			name:     "omitted without the option",
+			endpoint: provider.EndpointResponses,
+			sse:      responsesSSE,
+			check: func(t *testing.T, body map[string]any) {
+				if _, present := body["reasoning"]; present {
+					t.Errorf("body reasoning = %v, want absent", body["reasoning"])
+				}
+			},
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var mu sync.Mutex
+			var gotBody map[string]any
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, _ := io.ReadAll(r.Body)
+				var body map[string]any
+				if err := json.Unmarshal(data, &body); err != nil {
+					t.Errorf("request body is not JSON: %v", err)
+				}
+				mu.Lock()
+				gotBody = body
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, test.sse)
+			}))
+			defer srv.Close()
+
+			p := provider.New(provider.Config{
+				BaseURL:     srv.URL,
+				TokenSource: auth.NewStatic("test-key"),
+				Model:       "test-model",
+				Endpoint:    test.endpoint,
+				MaxRetries:  1,
+			})
+
+			a := New(p, test.opts...)
+			if _, _, err := a.Step(context.Background(), []conversation.Message{userMessage("hi")}); err != nil {
+				t.Fatalf("Step: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if gotBody == nil {
+				t.Fatal("backend never received a request body")
+			}
+			test.check(t, gotBody)
+		})
+	}
+}
