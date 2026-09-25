@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.7.0] - 2026-09-25 (93.95%)
+### Added
+- Groq cloud is now a supported provider: log in with a `gsk_…` API key via `profile.Manager`, the login example, or the web `POST /providers/groq/login` route, and pick from its models in any picker
+- Groq models are discovered live from its `/models` endpoint; retired entries (`active: false`) and audio-only families (Whisper, PlayAI TTS) are hidden and each model's `context_window` is propagated to `ModelInfo`
+- `provider.GroqConfig()` helper and `ModelMeta.Active` field for embedders wiring Groq directly
+- `/effort` TUI command picks the reasoning effort (`default`, or `none` through `max`) mid-session; the current level shows in the status bar and a 400 while an effort is set suggests trying another level
+- Reasoning effort persists across TUI restarts via `tui.WithEffortStore`, backed by `profile.Manager.ReasoningEffort` / `SetReasoningEffort` and a `reasoning_effort` field in `config.json`
+- `agent.SetReasoningEffort` / `ReasoningEffort` change and read an agent's effort at runtime, and `provider.ReasoningEffortLevels()` lists every level
+
 ## [0.6.0] - 2026-09-21 (93.83%)
 ### Added
 - Reasoning effort control: `provider.Config.ReasoningEffort` (default for every call), `provider.Request.ReasoningEffort` (per-call override) and `agent.WithReasoningEffort(level)`, with the `provider.ReasoningEffortNone|Minimal|Low|Medium|High` constants. Sent as `reasoning.effort` on `/responses` and `reasoning_effort` on `/chat/completions`; omitted when unset, so the model keeps its own default
