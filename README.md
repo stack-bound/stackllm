@@ -139,21 +139,146 @@ Every provider shares the same `Complete(ctx, Request)` surface and returns a st
 
 ### Vendor-specific request fields
 
-`ExtraBody` adds top-level fields the typed `Request` doesn't model, such as OpenRouter's [provider routing](https://openrouter.ai/docs/features/provider-routing). Set a default on `provider.Config.ExtraBody`, or per agent — and switch it along with the model:
+`ExtraBody` adds top-level fields the typed `Request` doesn't model. Set a default for every call on `provider.Config.ExtraBody`, per agent with `agent.WithExtraBody` / `Agent.SetExtraBody`, or per call on `provider.Request.ExtraBody`. Agent/request fields override config fields per key, a `nil` value removes a configured key, and `model`, `messages`, `input` and `stream` are reserved (`Complete` returns an error if you set them).
+
+### OpenRouter provider routing
+
+OpenRouter serves most models from several upstream providers (Llama 3.3 70B, for example, is available from Groq, Together, DeepInfra, SambaNova and others). By default it picks one for you, balancing price and uptime. To choose for yourself, send OpenRouter's [`provider` routing object](https://openrouter.ai/docs/features/provider-routing) through `ExtraBody`.
+
+Providers are identified by lowercase slugs such as `groq`, `together`, `deepinfra`, `sambanova`, `azure`, `openai` and `google-vertex`. To see which providers serve a model, and their slugs, query its endpoints:
+
+```bash
+curl -s https://openrouter.ai/api/v1/models/meta-llama/llama-3.3-70b-instruct/endpoints
+```
+
+The fields you'll use most:
+
+| Field | Type | Effect |
+|---|---|---|
+| `order` | `[]string` | Try these providers first, in this order |
+| `allow_fallbacks` | `bool` | `false` stops OpenRouter from falling back to providers outside your list (default `true`) |
+| `only` | `[]string` | Allowlist: never use any other provider |
+| `ignore` | `[]string` | Blocklist: never use these providers |
+| `sort` | `string` | `"price"`, `"throughput"` or `"latency"`, instead of the default balancing |
+| `require_parameters` | `bool` | Only use providers that support every parameter you send (e.g. `tools`, `reasoning_effort`) |
+| `data_collection` | `string` | `"deny"` skips providers that may store or train on your prompts |
+| `quantizations` | `[]string` | Restrict to precisions such as `"fp8"`, `"bf16"`, `"fp16"` |
+
+**Preferred order, with fallback.** Try Groq, then Together; if both are unavailable OpenRouter still routes the request elsewhere:
 
 ```go
 a := agent.New(p,
     agent.WithModel("meta-llama/llama-3.3-70b-instruct"),
     agent.WithExtraBody(map[string]any{
-        "provider": map[string]any{"order": []string{"groq", "cerebras"}, "allow_fallbacks": false},
+        "provider": map[string]any{
+            "order": []string{"groq", "together"},
+        },
     }),
 )
-
-a.SetModel("openai/gpt-4o")
-a.SetExtraBody(map[string]any{"provider": map[string]any{"only": []string{"azure"}}})
 ```
 
-Agent/request fields override config fields per key, a `nil` value removes a configured key, and `model`, `messages`, `input` and `stream` are reserved.
+**Strict order, no fallback.** Only Groq or Together will ever serve the request. If neither can, the call fails instead of silently going to another provider:
+
+```go
+agent.WithExtraBody(map[string]any{
+    "provider": map[string]any{
+        "order":           []string{"groq", "together"},
+        "allow_fallbacks": false,
+    },
+})
+```
+
+**Allowlist.** Let OpenRouter choose, but only among these providers:
+
+```go
+agent.WithExtraBody(map[string]any{
+    "provider": map[string]any{
+        "only": []string{"azure", "openai"},
+    },
+})
+```
+
+**Blocklist.** Use any provider except these:
+
+```go
+agent.WithExtraBody(map[string]any{
+    "provider": map[string]any{
+        "ignore": []string{"deepinfra", "novita"},
+    },
+})
+```
+
+**Combining fields.** Pick the cheapest of a shortlist, skip providers that retain data, and skip any that can't handle tool calls:
+
+```go
+agent.WithExtraBody(map[string]any{
+    "provider": map[string]any{
+        "only":               []string{"groq", "together", "deepinfra", "sambanova"},
+        "sort":               "price",
+        "data_collection":    "deny",
+        "require_parameters": true,
+    },
+})
+```
+
+#### Different providers for each model
+
+Routing is per request, so keep a routing table keyed by model and switch it whenever you switch models. `SetModel` and `SetExtraBody` must not be called while a `Run` or `Step` is in progress:
+
+```go
+routing := map[string]map[string]any{
+    "meta-llama/llama-3.3-70b-instruct": {"order": []string{"groq", "sambanova"}, "allow_fallbacks": false},
+    "openai/gpt-4o":                     {"only": []string{"azure"}},
+    "deepseek/deepseek-chat-v3.1":       {"ignore": []string{"novita"}, "sort": "throughput"},
+}
+
+useModel := func(a *agent.Agent, model string) {
+    a.SetModel(model)
+    if r, ok := routing[model]; ok {
+        a.SetExtraBody(map[string]any{"provider": r})
+    } else {
+        a.SetExtraBody(nil) // no routing: OpenRouter's default choice
+    }
+}
+
+useModel(a, "openai/gpt-4o")
+events, err := a.Run(ctx, msgs)
+```
+
+This works the same whether the provider came from `profile.Manager` (`mgr.LoadDefault(ctx)` / `mgr.LoadProvider(ctx, "openrouter", model)`) or was built directly.
+
+#### A default for every call
+
+When you build the provider yourself, you can set routing once on the config. Agent routing still overrides it, and a `nil` value drops it for particular requests:
+
+```go
+cfg := provider.OpenRouterConfig("meta-llama/llama-3.3-70b-instruct", auth.NewStatic(os.Getenv("OPENROUTER_API_KEY")))
+cfg.ExtraBody = map[string]any{
+    "provider": map[string]any{"ignore": []string{"deepinfra"}},
+}
+p := provider.New(cfg)
+
+// One call routed differently, without touching the config:
+events, err := p.Complete(ctx, provider.Request{
+    Messages:  msgs,
+    Stream:    true,
+    ExtraBody: map[string]any{"provider": map[string]any{"only": []string{"groq"}}},
+})
+
+// One call with the configured routing removed:
+events, err = p.Complete(ctx, provider.Request{
+    Messages:  msgs,
+    Stream:    true,
+    ExtraBody: map[string]any{"provider": nil},
+})
+```
+
+The whole `provider` object is replaced, not merged field by field: a request that sets `{"only": ["groq"]}` does not keep the configured `ignore` list.
+
+#### Shortcuts and account settings
+
+- **Model suffixes.** For speed or price alone, no `ExtraBody` is needed: append `:nitro` (highest throughput) or `:floor` (lowest price) to the model ID, e.g. `openrouter/meta-llama/llama-3.3-70b-instruct:nitro` as the default model, or `a.SetModel("meta-llama/llama-3.3-70b-instruct:floor")`.
+- **Account-wide lists.** OpenRouter's account settings also have *Allowed providers* and *Ignored providers*. They apply to every request made with your key and cannot target individual models. A request's `only` can narrow the allowed list but not widen it, and its `ignore` is added to the account's ignored list.
 
 ## Sessions
 
