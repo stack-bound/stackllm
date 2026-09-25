@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.8.0] - 2026-09-25 (93.97%)
+### Added
+- OpenRouter is now a supported provider: log in with an `sk-or-…` API key via `profile.Manager`, the login example, or the web `POST /providers/openrouter/login` route, and pick from its models in any picker
+- OpenRouter models are discovered live from its `/models` endpoint with vendor-namespaced IDs (e.g. `openrouter/openai/gpt-4o`) and each model's `context_length` propagated to `ModelInfo`
+- `provider.OpenRouterConfig()` helper and `provider.OpenRouterBaseURL` constant for embedders wiring OpenRouter directly
+
 ## [0.7.0] - 2026-09-25 (93.95%)
 ### Added
 - Groq cloud is now a supported provider: log in with a `gsk_…` API key via `profile.Manager`, the login example, or the web `POST /providers/groq/login` route, and pick from its models in any picker
