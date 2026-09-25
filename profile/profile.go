@@ -23,6 +23,7 @@ const (
 	ProviderOpenAI  = "openai"
 	ProviderCopilot = "copilot"
 	ProviderGemini  = "gemini"
+	ProviderGroq    = "groq"
 	ProviderOllama  = "ollama"
 )
 
@@ -31,10 +32,11 @@ const (
 	keyOpenAI        = "openai_api_key"
 	keyCopilotGitHub = "copilot_github_token"
 	keyGemini        = "gemini_api_key"
+	keyGroq          = "groq_api_key"
 )
 
 // allProviders is the canonical ordering.
-var allProviders = []string{ProviderOpenAI, ProviderCopilot, ProviderGemini, ProviderOllama}
+var allProviders = []string{ProviderOpenAI, ProviderCopilot, ProviderGemini, ProviderGroq, ProviderOllama}
 
 // Callbacks lets callers inject UI behaviour for interactive flows.
 type Callbacks struct {
@@ -47,7 +49,7 @@ type Callbacks struct {
 	// OnSuccess is called when a device flow completes successfully.
 	OnSuccess func()
 
-	// OnPromptKey prompts the user for an API key (e.g. OpenAI, Gemini).
+	// OnPromptKey prompts the user for an API key (e.g. OpenAI, Gemini, Groq).
 	OnPromptKey func(providerName string) (string, error)
 
 	// OnPromptURL prompts the user for a base URL (e.g. Ollama).
@@ -160,6 +162,8 @@ func (m *Manager) Login(ctx context.Context, providerName string) error {
 		return m.loginAPIKey(ctx, ProviderOpenAI, keyOpenAI)
 	case ProviderGemini:
 		return m.loginAPIKey(ctx, ProviderGemini, keyGemini)
+	case ProviderGroq:
+		return m.loginAPIKey(ctx, ProviderGroq, keyGroq)
 	case ProviderCopilot:
 		return m.loginCopilot(ctx)
 	case ProviderOllama:
@@ -290,6 +294,8 @@ func (m *Manager) Logout(ctx context.Context, providerName string) error {
 		return auth.NewCodexDeviceSource(auth.CodexDeviceConfig{Store: m.authStore}).Logout(ctx)
 	case ProviderGemini:
 		return m.authStore.Delete(ctx, keyGemini)
+	case ProviderGroq:
+		return m.authStore.Delete(ctx, keyGroq)
 	case ProviderCopilot:
 		return m.authStore.Delete(ctx, keyCopilotGitHub)
 	case ProviderOllama:
@@ -337,6 +343,9 @@ func (m *Manager) isAuthenticated(ctx context.Context, name string, cfg *config.
 		return false
 	case ProviderGemini:
 		_, err := m.authStore.Load(ctx, keyGemini)
+		return err == nil
+	case ProviderGroq:
+		_, err := m.authStore.Load(ctx, keyGroq)
 		return err == nil
 	case ProviderCopilot:
 		_, err := m.authStore.Load(ctx, keyCopilotGitHub)
@@ -452,6 +461,17 @@ func (m *Manager) listModelsForProvider(ctx context.Context, providerName string
 		if meta.ModelPickerEnabled != nil && !*meta.ModelPickerEnabled {
 			continue
 		}
+		// Groq keeps retired / paused models in its catalogue with
+		// active=false; they reject every request, so hide them.
+		if meta.Active != nil && !*meta.Active {
+			continue
+		}
+		// Groq's /models has no type field, so audio-only models
+		// (speech-to-text, text-to-speech) can only be recognised
+		// by name. They 400 on /chat/completions.
+		if providerName == ProviderGroq && isGroqAudioModel(meta.ID) {
+			continue
+		}
 		cw := meta.ContextWindow
 		if cw == 0 {
 			cw = provider.ContextWindow(meta.ID)
@@ -464,6 +484,17 @@ func (m *Manager) listModelsForProvider(ctx context.Context, providerName string
 		})
 	}
 	return out, nil
+}
+
+// isGroqAudioModel reports whether a Groq model ID belongs to one of
+// its audio families (Whisper transcription / translation, PlayAI
+// text-to-speech). Groq's /models response carries no capability
+// type, so this name heuristic is the only way to keep models that
+// cannot serve /chat/completions out of the picker. It is a family
+// match, not a model allowlist — new chat models appear automatically.
+func isGroqAudioModel(id string) bool {
+	lower := strings.ToLower(id)
+	return strings.Contains(lower, "whisper") || strings.Contains(lower, "tts")
 }
 
 // endpointForMeta selects the API endpoint a model should be called on,
@@ -768,6 +799,19 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model, endpoi
 		}
 		ts := auth.NewStatic(key)
 		cfg := provider.GeminiConfig(model, ts)
+		cfg.Endpoint = endpoint
+		if m.httpClient != nil {
+			cfg.HTTPClient = m.httpClient
+		}
+		return provider.New(cfg), nil
+
+	case ProviderGroq:
+		key, err := m.authStore.Load(ctx, keyGroq)
+		if err != nil {
+			return nil, fmt.Errorf("profile: groq not authenticated: %w", err)
+		}
+		ts := auth.NewStatic(key)
+		cfg := provider.GroqConfig(model, ts)
 		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient

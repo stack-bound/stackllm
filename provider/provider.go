@@ -138,16 +138,23 @@ type Request struct {
 // field is a pointer so callers can distinguish "explicitly disabled"
 // (false) from "not set by upstream" (nil) — only Copilot exposes it.
 //
+// Active mirrors the top-level active flag on Groq's /models response.
+// Groq keeps deprecated or temporarily unavailable models in the list
+// with active=false; those should not be offered in a picker. Like
+// ModelPickerEnabled it is a pointer so "explicitly inactive" (false)
+// is distinguishable from "not reported" (nil).
+//
 // ContextWindow is the maximum prompt length in tokens for this model,
-// populated from capabilities.limits.max_prompt_tokens on Copilot. It
-// is zero for providers that do not expose this field; callers that
-// need a value for unknown models should fall back to
-// provider.ContextWindow(ID).
+// populated from capabilities.limits.max_prompt_tokens on Copilot and
+// from the top-level context_window on Groq. It is zero for providers
+// that do not expose this field; callers that need a value for
+// unknown models should fall back to provider.ContextWindow(ID).
 type ModelMeta struct {
 	ID                 string
 	SupportedEndpoints []string
 	Type               string
 	ModelPickerEnabled *bool
+	Active             *bool
 	ContextWindow      int
 }
 

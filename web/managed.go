@@ -27,6 +27,7 @@ import (
 //	POST   /providers/openai/oauth/login    — starts OpenAI Codex device flow (ChatGPT sign-in)
 //	GET    /providers/openai/oauth/status   — polls in-progress Codex device flow
 //	POST   /providers/gemini/login          — body {"key":"..."}
+//	POST   /providers/groq/login            — body {"key":"..."}
 //	POST   /providers/ollama/login          — body {"base_url":"..."} (optional)
 //	POST   /providers/copilot/login         — starts GitHub device flow, returns code
 //	GET    /providers/copilot/status        — polls in-progress Copilot device flow
@@ -103,6 +104,7 @@ func NewManagedHandler(mgr *profile.Manager, store session.SessionStore, opts ..
 	h.mux.HandleFunc("POST /providers/openai/oauth/login", h.handleOpenAIOAuthStart)
 	h.mux.HandleFunc("GET /providers/openai/oauth/status", h.handleOpenAIOAuthStatus)
 	h.mux.HandleFunc("POST /providers/gemini/login", h.handleAPIKeyLogin(profile.ProviderGemini))
+	h.mux.HandleFunc("POST /providers/groq/login", h.handleAPIKeyLogin(profile.ProviderGroq))
 	h.mux.HandleFunc("POST /providers/ollama/login", h.handleOllamaLogin)
 	h.mux.HandleFunc("POST /providers/copilot/login", h.handleCopilotStart)
 	h.mux.HandleFunc("GET /providers/copilot/status", h.handleCopilotStatus)

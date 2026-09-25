@@ -401,3 +401,20 @@ func TestBeginCopilotLogin_CancelAbortsBackgroundPolling(t *testing.T) {
 		t.Errorf("state after cancel = %q, want error", flow.State())
 	}
 }
+
+func TestSaveAPIKey_Groq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mgr, as, _ := testManager(t)
+
+	if err := mgr.SaveAPIKey(ctx, ProviderGroq, "gsk_web_key"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	got, err := as.Load(ctx, keyGroq)
+	if err != nil {
+		t.Fatalf("Load groq key: %v", err)
+	}
+	if got != "gsk_web_key" {
+		t.Errorf("stored key = %q, want gsk_web_key", got)
+	}
+}

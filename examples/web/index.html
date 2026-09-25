@@ -121,6 +121,10 @@ function renderProviderAction(p) {
       appendAPIKeyForm(wrap, "gemini", "AIza…");
       break;
 
+    case "groq":
+      appendAPIKeyForm(wrap, "groq", "gsk_…");
+      break;
+
     case "ollama":
       const url = document.createElement("input");
       url.type = "text";

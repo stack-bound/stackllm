@@ -580,6 +580,7 @@ func TestProviderConfigs(t *testing.T) {
 		{"Ollama", OllamaConfig("http://localhost:11434", "llama3"), "http://localhost:11434/v1"},
 		{"Copilot", CopilotConfig("gpt-4", auth.NewStatic("k")), "https://api.githubcopilot.com"},
 		{"Gemini", GeminiConfig("gemini-pro", auth.NewStatic("k")), "https://generativelanguage.googleapis.com/v1beta/openai"},
+		{"Groq", GroqConfig("llama-3.3-70b-versatile", auth.NewStatic("k")), GroqBaseURL},
 	}
 
 	for _, tt := range tests {
@@ -790,4 +791,66 @@ func ExampleOpenAIConfig() {
 	cfg := OpenAIConfig("gpt-4o", auth.NewStatic("key"))
 	fmt.Println(cfg.BaseURL)
 	// Output: https://api.openai.com/v1
+}
+
+// TestOpenAIProvider_Models_GroqShape exercises the Groq /models
+// payload, which reports context_window and active at the top level
+// of each entry (no capabilities block). Both must land on ModelMeta
+// so profile can size the context and hide retired models without a
+// per-provider code path.
+func TestOpenAIProvider_Models_GroqShape(t *testing.T) {
+	t.Parallel()
+
+	body := `{"object":"list","data":[
+		{"id":"llama-3.3-70b-versatile","object":"model","created":1,"owned_by":"Meta","active":true,"context_window":131072,"public_apps":null},
+		{"id":"llama3-8b-8192","object":"model","created":1,"owned_by":"Meta","active":false,"context_window":8192,"public_apps":null},
+		{"id":"no-flags","object":"model"}
+	]}`
+	cfg := GroqConfig("", auth.NewStatic("gsk_test"))
+	cfg.HTTPClient = newTestClient(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != GroqBaseURL+"/models" {
+			t.Errorf("unexpected URL: %s", req.URL)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer gsk_test" {
+			t.Errorf("Authorization = %q, want bearer key", got)
+		}
+		return textResponse(http.StatusOK, "application/json", body), nil
+	})
+	p := New(cfg)
+
+	models, err := p.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models error: %v", err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("got %d models, want 3", len(models))
+	}
+	byID := map[string]ModelMeta{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+
+	live := byID["llama-3.3-70b-versatile"]
+	if live.ContextWindow != 131072 {
+		t.Errorf("live ContextWindow = %d, want 131072", live.ContextWindow)
+	}
+	if live.Active == nil || !*live.Active {
+		t.Errorf("live Active = %v, want true", live.Active)
+	}
+
+	retired := byID["llama3-8b-8192"]
+	if retired.Active == nil || *retired.Active {
+		t.Errorf("retired Active = %v, want false", retired.Active)
+	}
+	if retired.ContextWindow != 8192 {
+		t.Errorf("retired ContextWindow = %d, want 8192", retired.ContextWindow)
+	}
+
+	bare := byID["no-flags"]
+	if bare.Active != nil {
+		t.Errorf("no-flags Active = %v, want nil (not reported)", *bare.Active)
+	}
+	if bare.ContextWindow != 0 {
+		t.Errorf("no-flags ContextWindow = %d, want 0", bare.ContextWindow)
+	}
 }

@@ -113,6 +113,22 @@ func GeminiConfig(model string, ts auth.TokenSource) Config {
 	}
 }
 
+// GroqBaseURL is the OpenAI-compatible root of the Groq cloud API.
+// Groq serves both /chat/completions and /models under this prefix.
+const GroqBaseURL = "https://api.groq.com/openai/v1"
+
+// GroqConfig returns config for Groq cloud (console.groq.com) via its
+// OpenAI-compatible endpoint. Groq authenticates with a static API key
+// sent as a bearer token, so pass auth.NewStatic(key).
+func GroqConfig(model string, ts auth.TokenSource) Config {
+	return Config{
+		BaseURL:     GroqBaseURL,
+		TokenSource: ts,
+		Model:       model,
+		MaxRetries:  3,
+	}
+}
+
 // OpenAIProvider implements Provider using the OpenAI chat completions API.
 type OpenAIProvider struct {
 	cfg Config
@@ -246,7 +262,11 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 			ID                 string   `json:"id"`
 			SupportedEndpoints []string `json:"supported_endpoints"`
 			ModelPickerEnabled *bool    `json:"model_picker_enabled"`
-			Capabilities       struct {
+			// Groq reports availability and context length at the
+			// top level of each entry rather than under capabilities.
+			Active        *bool `json:"active"`
+			ContextWindow int   `json:"context_window"`
+			Capabilities  struct {
 				Type   string `json:"type"`
 				Limits struct {
 					MaxPromptTokens  int `json:"max_prompt_tokens"`
@@ -273,11 +293,15 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 		if cw == 0 {
 			cw = m.Capabilities.Limits.MaxInputTokens
 		}
+		if cw == 0 {
+			cw = m.ContextWindow
+		}
 		models[i] = ModelMeta{
 			ID:                 m.ID,
 			SupportedEndpoints: m.SupportedEndpoints,
 			Type:               m.Capabilities.Type,
 			ModelPickerEnabled: m.ModelPickerEnabled,
+			Active:             m.Active,
 			ContextWindow:      cw,
 		}
 	}

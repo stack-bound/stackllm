@@ -814,3 +814,82 @@ func TestManagedHandler_ListProviderModels_Unauthenticated(t *testing.T) {
 
 // compile-time check: provider.Event / conversation types are correctly imported.
 var _ = provider.EventTypeDone
+
+// TestManagedHandler_GroqLoginAndModels drives the browser flow for
+// Groq end to end: save an API key over HTTP, confirm /providers
+// reports it authenticated, then list its models from the (mocked)
+// live /models endpoint and confirm the key was sent as a bearer
+// token.
+func TestManagedHandler_GroqLoginAndModels(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openai/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"id": "llama-3.3-70b-versatile", "active": true, "context_window": 131072},
+				{"id": "llama3-8b-8192", "active": false, "context_window": 8192},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mgr := newTestManager(t, profile.WithHTTPClient(redirectClient(srv)))
+	h := NewManagedHandler(mgr, session.NewInMemoryStore())
+
+	req := httptest.NewRequest("POST", "/providers/groq/login", strings.NewReader(`{"key":"gsk_x"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/providers", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var provs struct {
+		Providers []profile.ProviderStatus `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &provs); err != nil {
+		t.Fatalf("decode providers: %v", err)
+	}
+	found := false
+	for _, p := range provs.Providers {
+		if p.Name == profile.ProviderGroq {
+			found = true
+			if !p.Authenticated {
+				t.Error("groq should be authenticated after login")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("groq missing from /providers: %+v", provs.Providers)
+	}
+
+	req = httptest.NewRequest("GET", "/models/groq", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("models status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if gotAuth != "Bearer gsk_x" {
+		t.Errorf("Authorization = %q, want Bearer gsk_x", gotAuth)
+	}
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Models) != 1 {
+		t.Fatalf("got %d models, want 1 (inactive filtered): %v", len(payload.Models), payload.Models)
+	}
+	if id := payload.Models[0]["id"]; id != "groq/llama-3.3-70b-versatile" {
+		t.Errorf("model id = %v, want groq/llama-3.3-70b-versatile", id)
+	}
+}

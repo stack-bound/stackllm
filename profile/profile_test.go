@@ -63,7 +63,19 @@ func modelsServer(t *testing.T, models ...string) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"data": data})
 	})
-	// Also handle /models for providers whose BaseURL already includes /v1.
+	// Also handle /models for providers whose BaseURL already includes /v1,
+	// and Groq's /openai/v1 prefix.
+	mux.HandleFunc("/openai/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		type modelEntry struct {
+			ID string `json:"id"`
+		}
+		data := make([]modelEntry, len(models))
+		for i, m := range models {
+			data[i] = modelEntry{ID: m}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": data})
+	})
 	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
 		type modelEntry struct {
 			ID string `json:"id"`
@@ -85,7 +97,7 @@ func TestAvailableProviders(t *testing.T) {
 	mgr, _, _ := testManager(t)
 
 	providers := mgr.AvailableProviders()
-	expected := []string{"openai", "copilot", "gemini", "ollama"}
+	expected := []string{"openai", "copilot", "gemini", "groq", "ollama"}
 	if len(providers) != len(expected) {
 		t.Fatalf("got %d providers, want %d", len(providers), len(expected))
 	}
@@ -874,6 +886,8 @@ type modelEntry struct {
 	ID                 string   `json:"id"`
 	SupportedEndpoints []string `json:"supported_endpoints,omitempty"`
 	ModelPickerEnabled *bool    `json:"model_picker_enabled,omitempty"`
+	Active             *bool    `json:"active,omitempty"`         // Groq
+	ContextWindow      int      `json:"context_window,omitempty"` // Groq
 	Capabilities       struct {
 		Type string `json:"type,omitempty"`
 	} `json:"capabilities,omitempty"`
@@ -893,6 +907,7 @@ func richModelsServer(t *testing.T, entries ...modelEntry) *httptest.Server {
 	}
 	mux.HandleFunc("/models", handler)
 	mux.HandleFunc("/v1/models", handler)
+	mux.HandleFunc("/openai/v1/models", handler) // Groq
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -1551,5 +1566,198 @@ func TestCodexAuth_APIKeyTakesPrecedenceOverCodex(t *testing.T) {
 	}
 	if len(models) != 1 || models[0] != "gpt-5.4" {
 		t.Errorf("ListModels = %v, want [gpt-5.4] (from API-key path)", models)
+	}
+}
+
+func TestLoginGroq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, _ := testManager(t, WithCallbacks(Callbacks{
+		OnPromptKey: func(name string) (string, error) {
+			if name != "groq" {
+				return "", fmt.Errorf("unexpected provider %q", name)
+			}
+			return "gsk_test_key", nil
+		},
+	}))
+
+	if err := mgr.Login(ctx, ProviderGroq); err != nil {
+		t.Fatalf("Login error: %v", err)
+	}
+
+	key, err := as.Load(ctx, keyGroq)
+	if err != nil {
+		t.Fatalf("Load key error: %v", err)
+	}
+	if key != "gsk_test_key" {
+		t.Errorf("stored key = %q, want %q", key, "gsk_test_key")
+	}
+
+	// Login must flip Status to authenticated for groq and nothing else.
+	statuses, err := mgr.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status error: %v", err)
+	}
+	for _, s := range statuses {
+		if s.Authenticated != (s.Name == ProviderGroq) {
+			t.Errorf("status[%s].Authenticated = %v", s.Name, s.Authenticated)
+		}
+	}
+}
+
+func TestLogoutGroq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, _ := testManager(t)
+	as.Save(ctx, keyGroq, "gsk_to_delete")
+
+	if err := mgr.Logout(ctx, ProviderGroq); err != nil {
+		t.Fatalf("Logout error: %v", err)
+	}
+	if _, err := as.Load(ctx, keyGroq); err == nil {
+		t.Error("expected key to be deleted after logout")
+	}
+	statuses, _ := mgr.Status(ctx)
+	for _, s := range statuses {
+		if s.Name == ProviderGroq && s.Authenticated {
+			t.Error("groq still reports authenticated after logout")
+		}
+	}
+}
+
+// TestLoadProvider_Groq verifies the built provider targets Groq's
+// OpenAI-compatible root and sends the stored key as a bearer token.
+func TestLoadProvider_Groq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var gotAuth, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/openai/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": []modelEntry{{ID: "llama-3.3-70b-versatile"}}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+
+	if _, err := mgr.LoadProvider(ctx, ProviderGroq, "llama-3.3-70b-versatile"); err == nil || !strings.Contains(err.Error(), "not authenticated") {
+		t.Fatalf("expected not-authenticated error before login, got %v", err)
+	}
+
+	as.Save(ctx, keyGroq, "gsk_test")
+	p, err := mgr.LoadProvider(ctx, ProviderGroq, "llama-3.3-70b-versatile")
+	if err != nil {
+		t.Fatalf("LoadProvider error: %v", err)
+	}
+	if p.Model() != "llama-3.3-70b-versatile" {
+		t.Errorf("Model() = %q", p.Model())
+	}
+	if _, err := p.Models(ctx); err != nil {
+		t.Fatalf("Models error: %v", err)
+	}
+	if gotPath != "/openai/v1/models" {
+		t.Errorf("request path = %q, want /openai/v1/models (Groq base URL)", gotPath)
+	}
+	if gotAuth != "Bearer gsk_test" {
+		t.Errorf("Authorization = %q, want Bearer gsk_test", gotAuth)
+	}
+}
+
+// TestListModels_Groq verifies that the Groq model list is fetched
+// live from /models (nothing hardcoded), that retired entries with
+// active=false and audio-only families are hidden, and that the
+// upstream context_window flows through to ModelInfo.
+func TestListModels_Groq(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	active := true
+	inactive := false
+	srv := richModelsServer(t,
+		modelEntry{ID: "llama-3.3-70b-versatile", Active: &active, ContextWindow: 131072},
+		modelEntry{ID: "openai/gpt-oss-120b", Active: &active, ContextWindow: 131072},
+		modelEntry{ID: "brand-new-model-no-flags"},
+		modelEntry{ID: "llama3-8b-8192", Active: &inactive, ContextWindow: 8192},
+		modelEntry{ID: "whisper-large-v3", Active: &active},
+		modelEntry{ID: "playai-tts", Active: &active},
+	)
+
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+
+	if _, err := mgr.ListModels(ctx, ProviderGroq); err == nil {
+		t.Fatal("expected error listing models before login")
+	}
+
+	as.Save(ctx, keyGroq, "gsk_test")
+	infos, err := mgr.ListProviderModels(ctx, ProviderGroq)
+	if err != nil {
+		t.Fatalf("ListProviderModels: %v", err)
+	}
+
+	got := map[string]ModelInfo{}
+	for _, m := range infos {
+		got[m.Model] = m
+	}
+	for _, want := range []string{"llama-3.3-70b-versatile", "openai/gpt-oss-120b", "brand-new-model-no-flags"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("expected %q in Groq models, got %v", want, infos)
+		}
+	}
+	for _, dont := range []string{"llama3-8b-8192", "whisper-large-v3", "playai-tts"} {
+		if _, ok := got[dont]; ok {
+			t.Errorf("expected %q to be filtered out, got %v", dont, infos)
+		}
+	}
+	if len(infos) != 3 {
+		t.Errorf("got %d models, want 3", len(infos))
+	}
+
+	live := got["llama-3.3-70b-versatile"]
+	if live.Provider != ProviderGroq {
+		t.Errorf("Provider = %q, want groq", live.Provider)
+	}
+	if live.ContextWindow != 131072 {
+		t.Errorf("ContextWindow = %d, want 131072 from upstream", live.ContextWindow)
+	}
+	if live.Endpoint != provider.EndpointChatCompletions {
+		t.Errorf("Endpoint = %q, want chat completions", live.Endpoint)
+	}
+
+	// A groq default must round-trip through SetDefault / LoadDefault.
+	if err := mgr.SetDefaultModel(live); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	p, err := mgr.LoadDefault(ctx)
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	if p.Model() != "llama-3.3-70b-versatile" {
+		t.Errorf("LoadDefault model = %q", p.Model())
+	}
+}
+
+func TestIsGroqAudioModel(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"whisper-large-v3":                          true,
+		"whisper-large-v3-turbo":                    true,
+		"distil-whisper-large-v3-en":                true,
+		"playai-tts":                                true,
+		"playai-tts-arabic":                         true,
+		"llama-3.3-70b-versatile":                   false,
+		"meta-llama/llama-4-scout-17b-16e-instruct": false,
+		"openai/gpt-oss-120b":                       false,
+		"groq/compound":                             false,
+	}
+	for id, want := range cases {
+		if got := isGroqAudioModel(id); got != want {
+			t.Errorf("isGroqAudioModel(%q) = %v, want %v", id, got, want)
+		}
 	}
 }
