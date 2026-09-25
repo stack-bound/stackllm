@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.8.1] - 2026-09-25 (93.99%)
+### Added
+- `ExtraBody` on `provider.Config` and `provider.Request` merges vendor-specific top-level fields into the request body on both `/chat/completions` and `/responses`, e.g. OpenRouter's `provider` routing object; request keys override config keys, a nil value removes one, and `model` / `messages` / `input` / `stream` are rejected as reserved
+- `agent.WithExtraBody`, `Agent.SetExtraBody` and `Agent.ExtraBody` send those fields from the agent, so OpenRouter upstream providers can be chosen per model alongside `SetModel`
+
 ## [0.8.0] - 2026-09-25 (93.97%)
 ### Added
 - OpenRouter is now a supported provider: log in with an `sk-or-…` API key via `profile.Manager`, the login example, or the web `POST /providers/openrouter/login` route, and pick from its models in any picker
