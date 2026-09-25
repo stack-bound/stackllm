@@ -418,3 +418,20 @@ func TestSaveAPIKey_Groq(t *testing.T) {
 		t.Errorf("stored key = %q, want gsk_web_key", got)
 	}
 }
+
+func TestSaveAPIKey_OpenRouter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mgr, as, _ := testManager(t)
+
+	if err := mgr.SaveAPIKey(ctx, ProviderOpenRouter, "sk-or-web-key"); err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	got, err := as.Load(ctx, keyOpenRouter)
+	if err != nil {
+		t.Fatalf("Load openrouter key: %v", err)
+	}
+	if got != "sk-or-web-key" {
+		t.Errorf("stored key = %q, want sk-or-web-key", got)
+	}
+}

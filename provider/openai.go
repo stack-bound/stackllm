@@ -129,6 +129,27 @@ func GroqConfig(model string, ts auth.TokenSource) Config {
 	}
 }
 
+// OpenRouterBaseURL is the OpenAI-compatible root of the OpenRouter
+// API. OpenRouter serves both /chat/completions and /models under this
+// prefix.
+const OpenRouterBaseURL = "https://openrouter.ai/api/v1"
+
+// OpenRouterConfig returns config for OpenRouter (openrouter.ai) via its
+// OpenAI-compatible endpoint. OpenRouter authenticates with a static
+// API key (sk-or-…) sent as a bearer token, so pass auth.NewStatic(key).
+// Model IDs are namespaced by upstream vendor, e.g. "openai/gpt-4o" or
+// "anthropic/claude-sonnet-4". Embedders that want their app listed in
+// OpenRouter's rankings can add the optional HTTP-Referer and X-Title
+// attribution headers via Config.ExtraHeaders.
+func OpenRouterConfig(model string, ts auth.TokenSource) Config {
+	return Config{
+		BaseURL:     OpenRouterBaseURL,
+		TokenSource: ts,
+		Model:       model,
+		MaxRetries:  3,
+	}
+}
+
 // OpenAIProvider implements Provider using the OpenAI chat completions API.
 type OpenAIProvider struct {
 	cfg Config
@@ -266,6 +287,8 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 			// top level of each entry rather than under capabilities.
 			Active        *bool `json:"active"`
 			ContextWindow int   `json:"context_window"`
+			// OpenRouter reports it as context_length instead.
+			ContextLength int `json:"context_length"`
 			Capabilities  struct {
 				Type   string `json:"type"`
 				Limits struct {
@@ -295,6 +318,9 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 		}
 		if cw == 0 {
 			cw = m.ContextWindow
+		}
+		if cw == 0 {
+			cw = m.ContextLength
 		}
 		models[i] = ModelMeta{
 			ID:                 m.ID,

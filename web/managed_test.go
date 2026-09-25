@@ -893,3 +893,80 @@ func TestManagedHandler_GroqLoginAndModels(t *testing.T) {
 		t.Errorf("model id = %v, want groq/llama-3.3-70b-versatile", id)
 	}
 }
+
+// TestManagedHandler_OpenRouterLoginAndModels drives the browser flow
+// for OpenRouter end to end: save an API key over HTTP, confirm
+// /providers reports it authenticated, then list its models from the
+// (mocked) live /api/v1/models endpoint and confirm the key was sent
+// as a bearer token and the vendor-namespaced IDs survive.
+func TestManagedHandler_OpenRouterLoginAndModels(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "openai/gpt-4o", "context_length": 128000},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mgr := newTestManager(t, profile.WithHTTPClient(redirectClient(srv)))
+	h := NewManagedHandler(mgr, session.NewInMemoryStore())
+
+	req := httptest.NewRequest("POST", "/providers/openrouter/login", strings.NewReader(`{"key":"sk-or-x"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", "/providers", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var provs struct {
+		Providers []profile.ProviderStatus `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &provs); err != nil {
+		t.Fatalf("decode providers: %v", err)
+	}
+	found := false
+	for _, p := range provs.Providers {
+		if p.Name == profile.ProviderOpenRouter {
+			found = true
+			if !p.Authenticated {
+				t.Error("openrouter should be authenticated after login")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("openrouter missing from /providers: %+v", provs.Providers)
+	}
+
+	req = httptest.NewRequest("GET", "/models/openrouter", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("models status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if gotAuth != "Bearer sk-or-x" {
+		t.Errorf("Authorization = %q, want Bearer sk-or-x", gotAuth)
+	}
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(payload.Models) != 1 {
+		t.Fatalf("got %d models, want 1: %v", len(payload.Models), payload.Models)
+	}
+	if id := payload.Models[0]["id"]; id != "openrouter/openai/gpt-4o" {
+		t.Errorf("model id = %v, want openrouter/openai/gpt-4o", id)
+	}
+}

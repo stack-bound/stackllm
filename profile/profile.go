@@ -21,11 +21,12 @@ import (
 
 // Provider name constants.
 const (
-	ProviderOpenAI  = "openai"
-	ProviderCopilot = "copilot"
-	ProviderGemini  = "gemini"
-	ProviderGroq    = "groq"
-	ProviderOllama  = "ollama"
+	ProviderOpenAI     = "openai"
+	ProviderCopilot    = "copilot"
+	ProviderGemini     = "gemini"
+	ProviderGroq       = "groq"
+	ProviderOpenRouter = "openrouter"
+	ProviderOllama     = "ollama"
 )
 
 // Auth store keys — must match the keys used by the auth package.
@@ -34,10 +35,11 @@ const (
 	keyCopilotGitHub = "copilot_github_token"
 	keyGemini        = "gemini_api_key"
 	keyGroq          = "groq_api_key"
+	keyOpenRouter    = "openrouter_api_key"
 )
 
 // allProviders is the canonical ordering.
-var allProviders = []string{ProviderOpenAI, ProviderCopilot, ProviderGemini, ProviderGroq, ProviderOllama}
+var allProviders = []string{ProviderOpenAI, ProviderCopilot, ProviderGemini, ProviderGroq, ProviderOpenRouter, ProviderOllama}
 
 // Callbacks lets callers inject UI behaviour for interactive flows.
 type Callbacks struct {
@@ -50,7 +52,7 @@ type Callbacks struct {
 	// OnSuccess is called when a device flow completes successfully.
 	OnSuccess func()
 
-	// OnPromptKey prompts the user for an API key (e.g. OpenAI, Gemini, Groq).
+	// OnPromptKey prompts the user for an API key (e.g. OpenAI, Gemini, Groq, OpenRouter).
 	OnPromptKey func(providerName string) (string, error)
 
 	// OnPromptURL prompts the user for a base URL (e.g. Ollama).
@@ -165,6 +167,8 @@ func (m *Manager) Login(ctx context.Context, providerName string) error {
 		return m.loginAPIKey(ctx, ProviderGemini, keyGemini)
 	case ProviderGroq:
 		return m.loginAPIKey(ctx, ProviderGroq, keyGroq)
+	case ProviderOpenRouter:
+		return m.loginAPIKey(ctx, ProviderOpenRouter, keyOpenRouter)
 	case ProviderCopilot:
 		return m.loginCopilot(ctx)
 	case ProviderOllama:
@@ -297,6 +301,8 @@ func (m *Manager) Logout(ctx context.Context, providerName string) error {
 		return m.authStore.Delete(ctx, keyGemini)
 	case ProviderGroq:
 		return m.authStore.Delete(ctx, keyGroq)
+	case ProviderOpenRouter:
+		return m.authStore.Delete(ctx, keyOpenRouter)
 	case ProviderCopilot:
 		return m.authStore.Delete(ctx, keyCopilotGitHub)
 	case ProviderOllama:
@@ -347,6 +353,9 @@ func (m *Manager) isAuthenticated(ctx context.Context, name string, cfg *config.
 		return err == nil
 	case ProviderGroq:
 		_, err := m.authStore.Load(ctx, keyGroq)
+		return err == nil
+	case ProviderOpenRouter:
+		_, err := m.authStore.Load(ctx, keyOpenRouter)
 		return err == nil
 	case ProviderCopilot:
 		_, err := m.authStore.Load(ctx, keyCopilotGitHub)
@@ -844,6 +853,19 @@ func (m *Manager) buildProvider(ctx context.Context, providerName, model, endpoi
 		}
 		ts := auth.NewStatic(key)
 		cfg := provider.GroqConfig(model, ts)
+		cfg.Endpoint = endpoint
+		if m.httpClient != nil {
+			cfg.HTTPClient = m.httpClient
+		}
+		return provider.New(cfg), nil
+
+	case ProviderOpenRouter:
+		key, err := m.authStore.Load(ctx, keyOpenRouter)
+		if err != nil {
+			return nil, fmt.Errorf("profile: openrouter not authenticated: %w", err)
+		}
+		ts := auth.NewStatic(key)
+		cfg := provider.OpenRouterConfig(model, ts)
 		cfg.Endpoint = endpoint
 		if m.httpClient != nil {
 			cfg.HTTPClient = m.httpClient

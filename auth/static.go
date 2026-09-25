@@ -8,7 +8,7 @@ type staticTokenSource struct {
 }
 
 // NewStatic creates a TokenSource that always returns the given token string.
-// Use for API keys (OpenAI, Gemini, Azure, Ollama).
+// Use for API keys (OpenAI, Gemini, Groq, OpenRouter, Azure, Ollama).
 func NewStatic(token string) TokenSource {
 	return &staticTokenSource{
 		token: &Token{AccessToken: token},

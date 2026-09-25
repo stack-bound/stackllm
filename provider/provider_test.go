@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -581,6 +582,7 @@ func TestProviderConfigs(t *testing.T) {
 		{"Copilot", CopilotConfig("gpt-4", auth.NewStatic("k")), "https://api.githubcopilot.com"},
 		{"Gemini", GeminiConfig("gemini-pro", auth.NewStatic("k")), "https://generativelanguage.googleapis.com/v1beta/openai"},
 		{"Groq", GroqConfig("llama-3.3-70b-versatile", auth.NewStatic("k")), GroqBaseURL},
+		{"OpenRouter", OpenRouterConfig("openai/gpt-4o", auth.NewStatic("k")), "https://openrouter.ai/api/v1"},
 	}
 
 	for _, tt := range tests {
@@ -852,5 +854,133 @@ func TestOpenAIProvider_Models_GroqShape(t *testing.T) {
 	}
 	if bare.ContextWindow != 0 {
 		t.Errorf("no-flags ContextWindow = %d, want 0", bare.ContextWindow)
+	}
+}
+
+// TestOpenAIProvider_Models_OpenRouterShape exercises the OpenRouter
+// /models payload, which reports the context length as a top-level
+// context_length (not context_window) and namespaces every model ID by
+// upstream vendor. The IDs must survive untouched and the context
+// length must land on ModelMeta.ContextWindow.
+func TestOpenAIProvider_Models_OpenRouterShape(t *testing.T) {
+	t.Parallel()
+
+	body := `{"data":[
+		{"id":"openai/gpt-4o","name":"OpenAI: GPT-4o","context_length":128000,
+		 "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
+		 "top_provider":{"context_length":128000,"max_completion_tokens":16384},
+		 "supported_parameters":["tools","reasoning_effort"]},
+		{"id":"anthropic/claude-sonnet-4","context_length":200000},
+		{"id":"no-length"}
+	]}`
+	cfg := OpenRouterConfig("", auth.NewStatic("sk-or-test"))
+	cfg.HTTPClient = newTestClient(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != OpenRouterBaseURL+"/models" {
+			t.Errorf("unexpected URL: %s", req.URL)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer sk-or-test" {
+			t.Errorf("Authorization = %q, want bearer key", got)
+		}
+		return textResponse(http.StatusOK, "application/json", body), nil
+	})
+	p := New(cfg)
+
+	models, err := p.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models error: %v", err)
+	}
+	want := map[string]int{
+		"openai/gpt-4o":             128000,
+		"anthropic/claude-sonnet-4": 200000,
+		"no-length":                 0,
+	}
+	if len(models) != len(want) {
+		t.Fatalf("got %d models, want %d", len(models), len(want))
+	}
+	for _, m := range models {
+		cw, ok := want[m.ID]
+		if !ok {
+			t.Errorf("unexpected model ID %q", m.ID)
+			continue
+		}
+		if m.ContextWindow != cw {
+			t.Errorf("%s ContextWindow = %d, want %d", m.ID, m.ContextWindow, cw)
+		}
+		if m.Active != nil {
+			t.Errorf("%s Active = %v, want nil (OpenRouter does not report it)", m.ID, *m.Active)
+		}
+	}
+}
+
+// TestOpenAIProvider_Complete_OpenRouter verifies a streamed chat call
+// against OpenRouter: the request hits /api/v1/chat/completions with
+// the vendor-namespaced model ID and reasoning_effort on the wire, and
+// OpenRouter's delta.reasoning stream is split into a thinking block
+// followed by a text block.
+func TestOpenAIProvider_Complete_OpenRouter(t *testing.T) {
+	t.Parallel()
+
+	sseData := `: OPENROUTER PROCESSING
+
+data: {"id":"gen-1","model":"openai/gpt-5","choices":[{"delta":{"role":"assistant","content":"","reasoning":"Let me think."}}]}
+
+data: {"id":"gen-1","model":"openai/gpt-5","choices":[{"delta":{"content":"Hi there"}}]}
+
+data: {"id":"gen-1","model":"openai/gpt-5","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	var body map[string]any
+	cfg := OpenRouterConfig("openai/gpt-5", auth.NewStatic("sk-or-test"))
+	cfg.MaxRetries = 1
+	cfg.ReasoningEffort = ReasoningEffortLow
+	cfg.HTTPClient = newTestClient(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != OpenRouterBaseURL+"/chat/completions" {
+			t.Errorf("unexpected URL: %s", req.URL)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer sk-or-test" {
+			t.Errorf("Authorization = %q, want bearer key", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		return textResponse(http.StatusOK, "text/event-stream", sseData), nil
+	})
+	p := New(cfg)
+
+	events, err := p.Complete(context.Background(), Request{
+		Messages: []conversation.Message{userText("Hi")},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+	var blocks []conversation.Block
+	for ev := range events {
+		switch ev.Type {
+		case EventTypeBlockEnd:
+			if ev.Block != nil {
+				blocks = append(blocks, *ev.Block)
+			}
+		case EventTypeError:
+			t.Fatalf("stream error: %v", ev.Err)
+		}
+	}
+
+	if body["model"] != "openai/gpt-5" {
+		t.Errorf("wire model = %v, want openai/gpt-5", body["model"])
+	}
+	if body["reasoning_effort"] != "low" {
+		t.Errorf("wire reasoning_effort = %v, want low", body["reasoning_effort"])
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2: %+v", len(blocks), blocks)
+	}
+	if blocks[0].Type != conversation.BlockThinking || blocks[0].Text != "Let me think." {
+		t.Errorf("block[0] = %s %q, want thinking %q", blocks[0].Type, blocks[0].Text, "Let me think.")
+	}
+	if blocks[1].Type != conversation.BlockText || blocks[1].Text != "Hi there" {
+		t.Errorf("block[1] = %s %q, want text %q", blocks[1].Type, blocks[1].Text, "Hi there")
 	}
 }

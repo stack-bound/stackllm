@@ -125,6 +125,10 @@ function renderProviderAction(p) {
       appendAPIKeyForm(wrap, "groq", "gsk_…");
       break;
 
+    case "openrouter":
+      appendAPIKeyForm(wrap, "openrouter", "sk-or-…");
+      break;
+
     case "ollama":
       const url = document.createElement("input");
       url.type = "text";

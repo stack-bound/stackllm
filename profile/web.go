@@ -13,7 +13,7 @@ import (
 // SaveAPIKey stores an API key for the named provider directly,
 // skipping the Callbacks.OnPromptKey interactive prompt used by Login.
 // This is the web / headless counterpart of Login for API-key
-// providers (openai, gemini, groq).
+// providers (openai, gemini, groq, openrouter).
 func (m *Manager) SaveAPIKey(ctx context.Context, providerName, key string) error {
 	if key == "" {
 		return fmt.Errorf("profile: SaveAPIKey: empty key for %s", providerName)
@@ -26,6 +26,8 @@ func (m *Manager) SaveAPIKey(ctx context.Context, providerName, key string) erro
 		storeKey = keyGemini
 	case ProviderGroq:
 		storeKey = keyGroq
+	case ProviderOpenRouter:
+		storeKey = keyOpenRouter
 	default:
 		return fmt.Errorf("profile: SaveAPIKey: %s is not an API-key provider", providerName)
 	}

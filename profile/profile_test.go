@@ -14,6 +14,7 @@ import (
 
 	"github.com/stack-bound/stackllm/auth"
 	"github.com/stack-bound/stackllm/config"
+	"github.com/stack-bound/stackllm/conversation"
 	"github.com/stack-bound/stackllm/provider"
 )
 
@@ -97,7 +98,7 @@ func TestAvailableProviders(t *testing.T) {
 	mgr, _, _ := testManager(t)
 
 	providers := mgr.AvailableProviders()
-	expected := []string{"openai", "copilot", "gemini", "groq", "ollama"}
+	expected := []string{"openai", "copilot", "gemini", "groq", "openrouter", "ollama"}
 	if len(providers) != len(expected) {
 		t.Fatalf("got %d providers, want %d", len(providers), len(expected))
 	}
@@ -888,6 +889,7 @@ type modelEntry struct {
 	ModelPickerEnabled *bool    `json:"model_picker_enabled,omitempty"`
 	Active             *bool    `json:"active,omitempty"`         // Groq
 	ContextWindow      int      `json:"context_window,omitempty"` // Groq
+	ContextLength      int      `json:"context_length,omitempty"` // OpenRouter
 	Capabilities       struct {
 		Type string `json:"type,omitempty"`
 	} `json:"capabilities,omitempty"`
@@ -908,6 +910,7 @@ func richModelsServer(t *testing.T, entries ...modelEntry) *httptest.Server {
 	mux.HandleFunc("/models", handler)
 	mux.HandleFunc("/v1/models", handler)
 	mux.HandleFunc("/openai/v1/models", handler) // Groq
+	mux.HandleFunc("/api/v1/models", handler)    // OpenRouter
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -1848,4 +1851,158 @@ func TestSetReasoningEffort_Errors(t *testing.T) {
 			t.Error("expected save error")
 		}
 	})
+}
+
+func TestLoginLogoutOpenRouter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, _ := testManager(t, WithCallbacks(Callbacks{
+		OnPromptKey: func(name string) (string, error) {
+			if name != "openrouter" {
+				return "", fmt.Errorf("unexpected provider %q", name)
+			}
+			return "sk-or-test-key", nil
+		},
+	}))
+
+	if err := mgr.Login(ctx, ProviderOpenRouter); err != nil {
+		t.Fatalf("Login error: %v", err)
+	}
+	key, err := as.Load(ctx, keyOpenRouter)
+	if err != nil {
+		t.Fatalf("Load key error: %v", err)
+	}
+	if key != "sk-or-test-key" {
+		t.Errorf("stored key = %q, want %q", key, "sk-or-test-key")
+	}
+
+	// Login must flip Status to authenticated for openrouter and nothing else.
+	statuses, err := mgr.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status error: %v", err)
+	}
+	found := false
+	for _, s := range statuses {
+		if s.Name == ProviderOpenRouter {
+			found = true
+		}
+		if s.Authenticated != (s.Name == ProviderOpenRouter) {
+			t.Errorf("status[%s].Authenticated = %v", s.Name, s.Authenticated)
+		}
+	}
+	if !found {
+		t.Fatal("openrouter missing from Status")
+	}
+
+	if err := mgr.Logout(ctx, ProviderOpenRouter); err != nil {
+		t.Fatalf("Logout error: %v", err)
+	}
+	if _, err := as.Load(ctx, keyOpenRouter); err == nil {
+		t.Error("expected key to be deleted after logout")
+	}
+	statuses, _ = mgr.Status(ctx)
+	for _, s := range statuses {
+		if s.Name == ProviderOpenRouter && s.Authenticated {
+			t.Error("openrouter still reports authenticated after logout")
+		}
+	}
+}
+
+// TestListModels_OpenRouter verifies the OpenRouter model list is
+// fetched live from /api/v1/models with the stored key, that the
+// vendor-namespaced IDs ("openai/gpt-4o") and context_length flow
+// through to ModelInfo, and that a namespaced model round-trips
+// through SetDefault("openrouter/openai/gpt-4o") → LoadDefault with
+// the full ID sent on the wire.
+func TestListModels_OpenRouter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	var modelsAuth, chatModel string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		modelsAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"data": []modelEntry{
+			{ID: "openai/gpt-4o", ContextLength: 128000},
+			{ID: "anthropic/claude-sonnet-4", ContextLength: 200000},
+		}})
+	})
+	mux.HandleFunc("/api/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		chatModel = body.Model
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mgr, as, _ := testManager(t, WithHTTPClient(redirectClient(srv)))
+
+	if _, err := mgr.LoadProvider(ctx, ProviderOpenRouter, "openai/gpt-4o"); err == nil || !strings.Contains(err.Error(), "not authenticated") {
+		t.Fatalf("expected not-authenticated error before login, got %v", err)
+	}
+
+	as.Save(ctx, keyOpenRouter, "sk-or-test")
+	infos, err := mgr.ListProviderModels(ctx, ProviderOpenRouter)
+	if err != nil {
+		t.Fatalf("ListProviderModels: %v", err)
+	}
+	if modelsAuth != "Bearer sk-or-test" {
+		t.Errorf("models Authorization = %q, want Bearer sk-or-test", modelsAuth)
+	}
+	want := map[string]int{"openai/gpt-4o": 128000, "anthropic/claude-sonnet-4": 200000}
+	if len(infos) != len(want) {
+		t.Fatalf("got %d models, want %d: %v", len(infos), len(want), infos)
+	}
+	for _, info := range infos {
+		if info.Provider != ProviderOpenRouter {
+			t.Errorf("%s Provider = %q, want openrouter", info.Model, info.Provider)
+		}
+		if info.ContextWindow != want[info.Model] {
+			t.Errorf("%s ContextWindow = %d, want %d", info.Model, info.ContextWindow, want[info.Model])
+		}
+		if info.Endpoint != provider.EndpointChatCompletions {
+			t.Errorf("%s Endpoint = %q, want chat completions", info.Model, info.Endpoint)
+		}
+	}
+
+	// "openrouter/openai/gpt-4o" must split on the first slash only so
+	// the vendor namespace stays part of the model ID.
+	if err := mgr.SetDefault("openrouter/openai/gpt-4o"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
+	p, err := mgr.LoadDefault(ctx)
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	if p.Model() != "openai/gpt-4o" {
+		t.Errorf("LoadDefault model = %q, want openai/gpt-4o", p.Model())
+	}
+	events, err := p.Complete(ctx, provider.Request{
+		Messages: []conversation.Message{{Role: conversation.RoleUser, Blocks: []conversation.Block{{Type: conversation.BlockText, Text: "hi"}}}},
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	var text string
+	for ev := range events {
+		if ev.Type == provider.EventTypeError {
+			t.Fatalf("stream error: %v", ev.Err)
+		}
+		if ev.Type == provider.EventTypeBlockDelta {
+			text += ev.Content
+		}
+	}
+	if chatModel != "openai/gpt-4o" {
+		t.Errorf("wire model = %q, want openai/gpt-4o", chatModel)
+	}
+	if text != "ok" {
+		t.Errorf("streamed text = %q, want ok", text)
+	}
 }

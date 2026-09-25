@@ -163,9 +163,10 @@ type Request struct {
 //
 // ContextWindow is the maximum prompt length in tokens for this model,
 // populated from capabilities.limits.max_prompt_tokens on Copilot and
-// from the top-level context_window on Groq. It is zero for providers
-// that do not expose this field; callers that need a value for
-// unknown models should fall back to provider.ContextWindow(ID).
+// from the top-level context_window on Groq and context_length on
+// OpenRouter. It is zero for providers that do not expose this field;
+// callers that need a value for unknown models should fall back to
+// provider.ContextWindow(ID).
 type ModelMeta struct {
 	ID                 string
 	SupportedEndpoints []string

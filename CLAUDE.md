@@ -23,7 +23,7 @@ tui/           ← Bubbletea TUI adapter (optional)
 web/           ← HTTP/SSE adapter (optional)
 ```
 
-All six supported providers use the OpenAI chat completions wire format:
+All seven supported providers use the OpenAI chat completions wire format:
 
 | Provider | Config helper | Auth |
 |---|---|---|
@@ -33,6 +33,7 @@ All six supported providers use the OpenAI chat completions wire format:
 | GitHub Copilot | `provider.CopilotConfig()` | Two-phase OAuth via `auth.NewCopilotSource()` |
 | Gemini | `provider.GeminiConfig()` | Google API key |
 | Groq | `provider.GroqConfig()` | Static API key (`gsk_…`) |
+| OpenRouter | `provider.OpenRouterConfig()` | Static API key (`sk-or-…`); model IDs are vendor-namespaced (`openai/gpt-4o`) |
 
 ## Build and test
 
@@ -69,7 +70,7 @@ Foundation types imported by every other package.
 
 Token management with pluggable storage.
 
-- `NewStatic(key)` — for API keys (OpenAI, Gemini, Groq, Azure, Ollama)
+- `NewStatic(key)` — for API keys (OpenAI, Gemini, Groq, OpenRouter, Azure, Ollama)
 - `NewCopilotSource(cfg)` — two-phase GitHub device flow → Copilot token exchange
 - `NewOpenAIDeviceSource(cfg)` — headless device code flow
 - `NewOpenAIWebFlowSource(cfg)` — PKCE flow with local callback server
@@ -98,7 +99,7 @@ registry.Register("read_file", "Read a file", func(ctx context.Context, args Rea
 
 ### provider/
 
-Single implementation for all five OpenAI-compatible backends.
+Single implementation for every OpenAI-compatible backends.
 
 ```go
 p := provider.New(provider.OpenAIConfig("gpt-4o", auth.NewStatic(os.Getenv("OPENAI_API_KEY"))))
@@ -318,7 +319,7 @@ http.ListenAndServe(":8080", api)
 Routes (mount under a prefix of your choosing):
 
 - `GET /providers` — list all providers with `{name, authenticated, is_default}`
-- `POST /providers/openai/login` / `POST /providers/gemini/login` / `POST /providers/groq/login` — body `{"key":"..."}`
+- `POST /providers/openai/login` / `POST /providers/gemini/login` / `POST /providers/groq/login` / `POST /providers/openrouter/login` — body `{"key":"..."}`
 - `POST /providers/openai/oauth/login` / `GET /providers/openai/oauth/status` — OpenAI OAuth device-code flow. 404 unless the handler was built with `WithOpenAIOAuthClientID(...)`. On success the access token is mirrored into the OpenAI API-key slot so the existing `LoadProvider` path works unchanged. Refresh is not hooked up — users re-auth via the web UI when the token expires. `/providers` advertises `openai_oauth_ready: bool` so the UI can hide the button when unconfigured.
 - `POST /providers/ollama/login` — body `{"base_url":"..."}` (optional)
 - `POST /providers/copilot/login` — starts GitHub device flow; blocks until the device code is issued, then returns `{status, user_code, verify_url}`. Background goroutine polls until the user completes authorisation.

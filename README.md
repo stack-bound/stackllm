@@ -6,7 +6,7 @@ You own the `[]Message` — the library provides the loop and the plumbing.
 
 ## Features
 
-- **One OpenAI-compatible provider** — talks to OpenAI, Azure OpenAI, Ollama, GitHub Copilot, Gemini, and Groq through a single implementation
+- **One OpenAI-compatible provider** — talks to OpenAI, Azure OpenAI, Ollama, GitHub Copilot, Gemini, Groq, and OpenRouter through a single implementation
 - **Unified provider manager** — one entry point for login, logout, status, model discovery, and default persistence across every supported provider
 - **Full context control** — the caller owns the message slice and decides what goes in it
 - **Block-shaped messages** — each message holds an ordered slice of typed blocks (text, thinking, tool_use, tool_result, image, redacted_thinking), so interleaved assistant output replays faithfully
@@ -132,9 +132,10 @@ provider.OllamaConfig("http://localhost:11434", "llama3")
 provider.CopilotConfig("gpt-4o", auth.NewCopilotSource(cfg))
 provider.GeminiConfig("gemini-2.5-pro", auth.NewStatic(key))
 provider.GroqConfig("llama-3.3-70b-versatile", auth.NewStatic(key))
+provider.OpenRouterConfig("openai/gpt-4o", auth.NewStatic(key))
 ```
 
-All five share the same `Complete(ctx, Request)` surface and return a streaming channel of block events (`BlockStart`, `BlockDelta`, `BlockEnd`, `ToolCall`, `Done`, `Error`). Each `BlockEnd` carries the fully accumulated `conversation.Block`; the agent concatenates them in order to build the assistant message, preserving any interleaving of thinking, text, and tool_use the model produced.
+Every provider shares the same `Complete(ctx, Request)` surface and return a streaming channel of block events (`BlockStart`, `BlockDelta`, `BlockEnd`, `ToolCall`, `Done`, `Error`). Each `BlockEnd` carries the fully accumulated `conversation.Block`; the agent concatenates them in order to build the assistant message, preserving any interleaving of thinking, text, and tool_use the model produced.
 
 ## Sessions
 
