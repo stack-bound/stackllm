@@ -56,6 +56,21 @@ type Config struct {
 	// endpoint accepts either value, with true (the server default)
 	// persisting state across calls.
 	DisableStore bool
+
+	// ExtraBody holds vendor-specific top-level fields merged into every
+	// request body, on both /chat/completions and /responses — e.g.
+	// OpenRouter's provider routing object:
+	//
+	//	ExtraBody: map[string]any{
+	//		"provider": map[string]any{"order": []string{"groq"}, "allow_fallbacks": false},
+	//	}
+	//
+	// Keys are merged after the typed fields, so they override anything
+	// the provider derives itself (reasoning_effort, temperature, …).
+	// Request.ExtraBody is merged on top per key; a nil value removes
+	// the key. "model", "messages", "input" and "stream" are reserved
+	// and make Complete return an error.
+	ExtraBody map[string]any
 }
 
 // OpenAIConfig returns config for the OpenAI API.
@@ -214,6 +229,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req Request) (<-chan Even
 // completeChat dispatches the request to the legacy /chat/completions endpoint.
 func (p *OpenAIProvider) completeChat(ctx context.Context, req Request) (<-chan Event, error) {
 	body := p.buildRequestBody(req)
+	if err := p.applyExtraBody(body, req); err != nil {
+		return nil, err
+	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -332,6 +350,29 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelMeta, error) {
 		}
 	}
 	return models, nil
+}
+
+// applyExtraBody merges Config.ExtraBody and then Request.ExtraBody
+// into body, so a per-call key overrides the configured default. A nil
+// value deletes the key, letting a request drop a configured default.
+// Reserved keys are refused rather than merged: replacing them would
+// desync the wire request from the conversation the caller passed in
+// (model / messages / input) or from the SSE parser (stream).
+func (p *OpenAIProvider) applyExtraBody(body map[string]any, req Request) error {
+	for _, extra := range []map[string]any{p.cfg.ExtraBody, req.ExtraBody} {
+		for k, v := range extra {
+			switch k {
+			case "model", "messages", "input", "stream":
+				return fmt.Errorf("provider: extra body: %q is reserved; set it through the typed Request fields", k)
+			}
+			if v == nil {
+				delete(body, k)
+				continue
+			}
+			body[k] = v
+		}
+	}
+	return nil
 }
 
 // buildRequestBody flattens the block-shaped Messages into the legacy

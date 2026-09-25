@@ -1,0 +1,17 @@
+deployment:
+  - ""
+added:
+  - "`ExtraBody` on `provider.Config` and `provider.Request` merges vendor-specific top-level fields into the request body on both `/chat/completions` and `/responses`, e.g. OpenRouter's `provider` routing object; request keys override config keys, a nil value removes one, and `model` / `messages` / `input` / `stream` are rejected as reserved"
+  - "`agent.WithExtraBody`, `Agent.SetExtraBody` and `Agent.ExtraBody` send those fields from the agent, so OpenRouter upstream providers can be chosen per model alongside `SetModel`"
+changed:
+  - ""
+deprecated:
+  - ""
+removed:
+  - ""
+fixed:
+  - ""
+security:
+  - ""
+yanked:
+  - ""

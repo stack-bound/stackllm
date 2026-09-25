@@ -134,6 +134,11 @@ type Request struct {
 	// back to Config.ReasoningEffort, and an empty config leaves the
 	// field off the wire so the model keeps its own default.
 	ReasoningEffort string
+
+	// ExtraBody holds vendor-specific top-level body fields for this
+	// call, merged over Config.ExtraBody per key (a nil value removes a
+	// configured key). See Config.ExtraBody for the merge rules.
+	ExtraBody map[string]any
 }
 
 // ModelMeta describes one model returned by a provider's /models endpoint.

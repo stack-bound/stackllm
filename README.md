@@ -135,7 +135,25 @@ provider.GroqConfig("llama-3.3-70b-versatile", auth.NewStatic(key))
 provider.OpenRouterConfig("openai/gpt-4o", auth.NewStatic(key))
 ```
 
-Every provider shares the same `Complete(ctx, Request)` surface and return a streaming channel of block events (`BlockStart`, `BlockDelta`, `BlockEnd`, `ToolCall`, `Done`, `Error`). Each `BlockEnd` carries the fully accumulated `conversation.Block`; the agent concatenates them in order to build the assistant message, preserving any interleaving of thinking, text, and tool_use the model produced.
+Every provider shares the same `Complete(ctx, Request)` surface and returns a streaming channel of block events (`BlockStart`, `BlockDelta`, `BlockEnd`, `ToolCall`, `Done`, `Error`). Each `BlockEnd` carries the fully accumulated `conversation.Block`; the agent concatenates them in order to build the assistant message, preserving any interleaving of thinking, text, and tool_use the model produced.
+
+### Vendor-specific request fields
+
+`ExtraBody` adds top-level fields the typed `Request` doesn't model, such as OpenRouter's [provider routing](https://openrouter.ai/docs/features/provider-routing). Set a default on `provider.Config.ExtraBody`, or per agent — and switch it along with the model:
+
+```go
+a := agent.New(p,
+    agent.WithModel("meta-llama/llama-3.3-70b-instruct"),
+    agent.WithExtraBody(map[string]any{
+        "provider": map[string]any{"order": []string{"groq", "cerebras"}, "allow_fallbacks": false},
+    }),
+)
+
+a.SetModel("openai/gpt-4o")
+a.SetExtraBody(map[string]any{"provider": map[string]any{"only": []string{"azure"}}})
+```
+
+Agent/request fields override config fields per key, a `nil` value removes a configured key, and `model`, `messages`, `input` and `stream` are reserved.
 
 ## Sessions
 

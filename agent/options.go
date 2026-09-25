@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/stack-bound/stackllm/tools"
+import (
+	"maps"
+
+	"github.com/stack-bound/stackllm/tools"
+)
 
 // Option configures an Agent.
 type Option func(*options)
@@ -11,6 +15,7 @@ type options struct {
 	temperature     *float64
 	maxTokens       int
 	reasoningEffort string
+	extraBody       map[string]any
 	hooks           Hooks
 	registry        *tools.Registry
 }
@@ -50,6 +55,20 @@ func WithMaxTokens(n int) Option {
 // every turn.
 func WithReasoningEffort(effort string) Option {
 	return func(o *options) { o.reasoningEffort = effort }
+}
+
+// WithExtraBody sets vendor-specific top-level fields sent in every
+// request body, such as OpenRouter's provider routing object:
+//
+//	agent.WithExtraBody(map[string]any{
+//		"provider": map[string]any{"order": []string{"groq"}, "allow_fallbacks": false},
+//	})
+//
+// They are passed as provider.Request.ExtraBody, so they override the
+// provider's Config.ExtraBody per key. The map is copied (shallowly),
+// so later changes to the caller's map do not leak into running calls.
+func WithExtraBody(extra map[string]any) Option {
+	return func(o *options) { o.extraBody = maps.Clone(extra) }
 }
 
 // WithHooks sets the agent hooks.

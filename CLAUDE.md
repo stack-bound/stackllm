@@ -99,7 +99,7 @@ registry.Register("read_file", "Read a file", func(ctx context.Context, args Rea
 
 ### provider/
 
-Single implementation for every OpenAI-compatible backends.
+Single implementation for every OpenAI-compatible backend.
 
 ```go
 p := provider.New(provider.OpenAIConfig("gpt-4o", auth.NewStatic(os.Getenv("OPENAI_API_KEY"))))
@@ -120,6 +120,7 @@ for ev := range events {
 - **Wire format.** The chat completions endpoint is lossy — `buildRequestBody` flattens blocks by concatenating text, hoisting `BlockToolUse` into `tool_calls`, emitting multi-part `content` arrays for images, and **dropping thinking blocks** (the legacy API has no slot for them). The `/responses` endpoint (`Endpoint=EndpointResponses`) preserves reasoning and is the only wire format that can faithfully replay interleaved blocks.
 - **Reasoning parsing.** `readChatSSE` recognises `delta.reasoning_content` / `delta.reasoning` alongside `delta.content` and emits separate `BlockThinking` / `BlockText` blocks in the order the model switches between them. `readResponsesSSE` maps each `output_item` (reasoning / message / function_call) to a block, closed in the order `output_item.done` fires.
 - **Reasoning effort.** `Config.ReasoningEffort` sets the default level for every call and `Request.ReasoningEffort` overrides it per call, using the `provider.ReasoningEffort*` constants (`None`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max` — which levels a given model accepts varies by generation: gpt-5 takes `minimal` but not `xhigh`, gpt-5.6 the other way round). It goes on the wire as `reasoning.effort` on `/responses` and as `reasoning_effort` on `/chat/completions`; empty in both leaves the field off so the model keeps its own default, which for the gpt-5 family is several seconds of thinking on every turn. A level a model does not support comes back as a 400 rather than being ignored.
+- **Extra body fields.** `Config.ExtraBody` / `Request.ExtraBody` (`map[string]any`) merge vendor-specific top-level fields into the request body on both endpoints — e.g. OpenRouter's `provider` routing object (`{"order": [...], "only": [...], "allow_fallbacks": false}`). They are merged after the typed fields (so they win over e.g. `temperature`), request over config per key, and a nil value removes a configured key. `model`, `messages`, `input` and `stream` are reserved: `Complete` returns an error rather than send a body that no longer matches the conversation or the stream parser.
 - Auto-retry on 429/5xx with exponential backoff (configurable MaxRetries)
 - Auth injected via `authRoundTripper` wrapping the HTTP client
 
@@ -145,8 +146,9 @@ for ev := range events {
 - **Block accumulation.** `Step` collects blocks from `EventTypeBlockEnd` events in the order the provider closes them, then builds one assistant `Message` whose `Blocks` is the full interleaved timeline. When the assistant message contains one or more `BlockToolUse` blocks, the agent dispatches them and appends **one** tool-role `Message` containing one `BlockToolResult` per tool_use (matching the Anthropic shape).
 - **Stable IDs.** Assistant and tool messages are passed through `conversation.EnsureMessageIDs` before being returned, so every persisted message and block has a stable identifier.
 - `WithReasoningEffort(level)` — how hard a reasoning model thinks before it answers; pass `provider.ReasoningEffortNone` for a latency-sensitive caller. Unset leaves the model on its own default. `SetReasoningEffort(level)` changes it at runtime (empty clears it) and `ReasoningEffort()` reads it back; `provider.ReasoningEffortLevels()` lists every level
+- `WithExtraBody(map)` — vendor-specific body fields sent as `Request.ExtraBody` on every call (copied, so the caller's map can't change a running agent). `SetExtraBody(map)` swaps them at runtime (nil clears) — call it alongside `SetModel` to pick OpenRouter upstream providers per model — and `ExtraBody()` returns a copy
 - `Hooks` — `BeforeCall`, `OnBlockStart`, `OnBlockDelta`, `OnBlockEnd`, `OnToken` (convenience wrapper that only fires for `BlockText` deltas), `OnToolCall`, `OnToolResult`, `AfterComplete`
-- **Concurrency.** An `Agent` is safe for concurrent use: `Run` snapshots the agent's options and wraps hooks in a per-run copy, so concurrent `Run` calls on one Agent never mutate shared state and each event channel receives only its own run's events. `SetProvider` / `SetModel` / `SetReasoningEffort` are the exception — they mutate the Agent and must not be called while a Run/Step is in progress.
+- **Concurrency.** An `Agent` is safe for concurrent use: `Run` snapshots the agent's options and wraps hooks in a per-run copy, so concurrent `Run` calls on one Agent never mutate shared state and each event channel receives only its own run's events. `SetProvider` / `SetModel` / `SetReasoningEffort` / `SetExtraBody` are the exception — they mutate the Agent and must not be called while a Run/Step is in progress.
 - Tool errors become `"Error: ..."` messages in the conversation (with `ToolIsError = true` on the block), not Go errors
 
 ### session/

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -322,6 +323,109 @@ func TestSetReasoningEffort_ChangesWireBetweenSteps(t *testing.T) {
 			t.Errorf("request %d: reasoning_effort = %v, want absent", i, got)
 		case step.want != "" && got != step.want:
 			t.Errorf("request %d: reasoning_effort = %v, want %q", i, got, step.want)
+		}
+	}
+}
+
+// TestExtraBody_ReachesWireAndSwitchesPerModel pins the agent-level
+// extra body the way an OpenRouter embedder uses it: WithExtraBody
+// routing reaches the wire and overrides the provider's configured
+// default per key; SetModel + SetExtraBody switch routing along with
+// the model between steps; nil clears it back to the provider default.
+// It also pins the copy semantics, so neither the caller's map nor the
+// map ExtraBody() hands back can change what the agent sends.
+func TestExtraBody_ReachesWireAndSwitchesPerModel(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var bodies []map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("request body is not JSON: %v", err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := provider.New(provider.Config{
+		BaseURL:     srv.URL,
+		TokenSource: auth.NewStatic("test-key"),
+		Model:       "meta-llama/llama-3.3-70b-instruct",
+		MaxRetries:  1,
+		ExtraBody: map[string]any{
+			"provider": map[string]any{"sort": "price"},
+			"user":     "cfg-user",
+		},
+	})
+
+	groq := map[string]any{"order": []any{"groq"}, "allow_fallbacks": false}
+	callerMap := map[string]any{"provider": groq}
+	a := New(p, WithExtraBody(callerMap))
+	// Mutating the caller's map after New must not change the wire.
+	callerMap["provider"] = "mutated"
+	// Nor may mutating the copy ExtraBody() returns.
+	a.ExtraBody()["provider"] = "mutated"
+
+	azure := map[string]any{"only": []any{"azure"}}
+	steps := []struct {
+		name         string
+		apply        func()
+		wantModel    string
+		wantProvider any
+	}{
+		{
+			name:         "WithExtraBody overrides config key",
+			wantModel:    "meta-llama/llama-3.3-70b-instruct",
+			wantProvider: groq,
+		},
+		{
+			name: "switch model and routing together",
+			apply: func() {
+				a.SetModel("openai/gpt-4o")
+				a.SetExtraBody(map[string]any{"provider": azure})
+			},
+			wantModel:    "openai/gpt-4o",
+			wantProvider: azure,
+		},
+		{
+			name:         "nil clears back to the provider default",
+			apply:        func() { a.SetExtraBody(nil) },
+			wantModel:    "openai/gpt-4o",
+			wantProvider: map[string]any{"sort": "price"},
+		},
+	}
+	for _, step := range steps {
+		if step.apply != nil {
+			step.apply()
+		}
+		if _, _, err := a.Step(context.Background(), []conversation.Message{userMessage("hi")}); err != nil {
+			t.Fatalf("%s: Step: %v", step.name, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != len(steps) {
+		t.Fatalf("backend saw %d requests, want %d", len(bodies), len(steps))
+	}
+	for i, step := range steps {
+		body := bodies[i]
+		if body["model"] != step.wantModel {
+			t.Errorf("%s: model = %v, want %s", step.name, body["model"], step.wantModel)
+		}
+		if !reflect.DeepEqual(body["provider"], step.wantProvider) {
+			t.Errorf("%s: provider = %#v, want %#v", step.name, body["provider"], step.wantProvider)
+		}
+		// Config keys the agent did not override always reach the wire.
+		if body["user"] != "cfg-user" {
+			t.Errorf("%s: user = %v, want cfg-user from Config.ExtraBody", step.name, body["user"])
 		}
 	}
 }

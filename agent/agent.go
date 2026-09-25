@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/stack-bound/stackllm/conversation"
@@ -34,8 +35,9 @@ type StepResult struct {
 // and/or Step calls may be in flight on the same Agent at once — each
 // Run works on a private copy of the agent's options, so events and
 // hooks never cross-wire between concurrent runs. The only exceptions
-// are SetProvider, SetModel and SetReasoningEffort, which mutate the
-// Agent and must not be called while any Run or Step is in progress.
+// are SetProvider, SetModel, SetReasoningEffort and SetExtraBody, which
+// mutate the Agent and must not be called while any Run or Step is in
+// progress.
 type Agent struct {
 	provider provider.Provider
 	opts     options
@@ -78,6 +80,19 @@ func (a *Agent) SetReasoningEffort(effort string) { a.opts.reasoningEffort = eff
 // Step/Run, as set by WithReasoningEffort or SetReasoningEffort. Empty
 // means the agent sends none and the provider or model default applies.
 func (a *Agent) ReasoningEffort() string { return a.opts.reasoningEffort }
+
+// SetExtraBody replaces the vendor-specific body fields sent on the
+// next Step/Run (see WithExtraBody); nil clears them. Use it to change
+// OpenRouter provider routing when switching models.
+//
+// SetExtraBody mutates the Agent and is NOT safe to call concurrently
+// with Run or Step: the caller must ensure no Run or Step is in
+// progress (and none is started concurrently) when calling it.
+func (a *Agent) SetExtraBody(extra map[string]any) { a.opts.extraBody = maps.Clone(extra) }
+
+// ExtraBody returns a copy of the vendor-specific body fields the
+// agent will send on its next Step/Run.
+func (a *Agent) ExtraBody() map[string]any { return maps.Clone(a.opts.extraBody) }
 
 // Model returns the model name the agent will use on its next
 // Step/Run. It mirrors whatever the most recent New / SetModel call
@@ -125,6 +140,7 @@ func (a *Agent) step(ctx context.Context, msgs []conversation.Message, o *option
 		MaxTokens:       o.maxTokens,
 		Temperature:     o.temperature,
 		ReasoningEffort: o.reasoningEffort,
+		ExtraBody:       o.extraBody,
 		Stream:          true,
 	}
 

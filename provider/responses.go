@@ -27,6 +27,9 @@ func (p *OpenAIProvider) completeResponses(ctx context.Context, req Request) (<-
 	if err != nil {
 		return nil, fmt.Errorf("provider: build responses request: %w", err)
 	}
+	if err := p.applyExtraBody(body, req); err != nil {
+		return nil, err
+	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
