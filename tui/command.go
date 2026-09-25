@@ -19,6 +19,7 @@ const (
 	CommandDelete   = "delete"
 	CommandExport   = "export"
 	CommandModels   = "models"
+	CommandEffort   = "effort"
 )
 
 // commands is the canonical list of slash commands surfaced in the popup
@@ -32,6 +33,7 @@ var commands = []Command{
 	{ID: CommandDelete, Name: "/delete", Description: "Delete the current session"},
 	{ID: CommandExport, Name: "/export", Description: "Save the current session as JSONL"},
 	{ID: CommandModels, Name: "/models", Description: "Switch model or provider"},
+	{ID: CommandEffort, Name: "/effort", Description: "Set reasoning effort (how long the model thinks)"},
 }
 
 // filterCommands returns the commands whose Name contains query as a

@@ -76,6 +76,23 @@ const (
 	ReasoningEffortMax     = "max"   // gpt-5.6 onwards
 )
 
+// ReasoningEffortLevels returns every ReasoningEffort* level, from least
+// to most thinking. Pickers use it to list the choices and config
+// loaders use it to reject a typo before it reaches the wire. It is the
+// union across model generations, so a level being listed does not mean
+// the current model accepts it.
+func ReasoningEffortLevels() []string {
+	return []string{
+		ReasoningEffortNone,
+		ReasoningEffortMinimal,
+		ReasoningEffortLow,
+		ReasoningEffortMedium,
+		ReasoningEffortHigh,
+		ReasoningEffortXHigh,
+		ReasoningEffortMax,
+	}
+}
+
 // ToolCall is an alias for conversation.ToolCall.
 type ToolCall = conversation.ToolCall
 

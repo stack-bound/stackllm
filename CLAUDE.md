@@ -143,9 +143,9 @@ for ev := range events {
 
 - **Block accumulation.** `Step` collects blocks from `EventTypeBlockEnd` events in the order the provider closes them, then builds one assistant `Message` whose `Blocks` is the full interleaved timeline. When the assistant message contains one or more `BlockToolUse` blocks, the agent dispatches them and appends **one** tool-role `Message` containing one `BlockToolResult` per tool_use (matching the Anthropic shape).
 - **Stable IDs.** Assistant and tool messages are passed through `conversation.EnsureMessageIDs` before being returned, so every persisted message and block has a stable identifier.
-- `WithReasoningEffort(level)` — how hard a reasoning model thinks before it answers; pass `provider.ReasoningEffortNone` for a latency-sensitive caller. Unset leaves the model on its own default
+- `WithReasoningEffort(level)` — how hard a reasoning model thinks before it answers; pass `provider.ReasoningEffortNone` for a latency-sensitive caller. Unset leaves the model on its own default. `SetReasoningEffort(level)` changes it at runtime (empty clears it) and `ReasoningEffort()` reads it back; `provider.ReasoningEffortLevels()` lists every level
 - `Hooks` — `BeforeCall`, `OnBlockStart`, `OnBlockDelta`, `OnBlockEnd`, `OnToken` (convenience wrapper that only fires for `BlockText` deltas), `OnToolCall`, `OnToolResult`, `AfterComplete`
-- **Concurrency.** An `Agent` is safe for concurrent use: `Run` snapshots the agent's options and wraps hooks in a per-run copy, so concurrent `Run` calls on one Agent never mutate shared state and each event channel receives only its own run's events. `SetProvider` / `SetModel` are the exception — they mutate the Agent and must not be called while a Run/Step is in progress.
+- **Concurrency.** An `Agent` is safe for concurrent use: `Run` snapshots the agent's options and wraps hooks in a per-run copy, so concurrent `Run` calls on one Agent never mutate shared state and each event channel receives only its own run's events. `SetProvider` / `SetModel` / `SetReasoningEffort` are the exception — they mutate the Agent and must not be called while a Run/Step is in progress.
 - Tool errors become `"Error: ..."` messages in the conversation (with `ToolIsError = true` on the block), not Go errors
 
 ### session/
@@ -275,6 +275,7 @@ p.Run()
 
 - `RenderMessage(msg)` / `RenderConversation(msgs)` — walks `msg.Blocks` in order and renders each typed block: text inline, thinking dimmed with a `thinking:` prefix, tool_use as `⚡ tool_name(args)`, tool_result with call id, image as `[image: mime, bytes]` placeholder, redacted thinking as a byte-count placeholder. Interleaving is preserved because blocks are rendered in slice order.
 - Live streaming uses `agent.EventBlockStart` / `EventBlockDelta` / `EventBlockEnd` so thinking text appears in a dimmed region between the surrounding text segments as the model produces it.
+- `/effort` opens a picker for the reasoning effort (`default` plus every `provider.ReasoningEffortLevels()` level). The choice applies to the agent via `SetReasoningEffort`, shows in the status line as `model · effort high`, and a 400 while an effort is set gets a hint to pick another level. `tui.WithEffortStore(mgr)` (satisfied by `profile.Manager`'s `ReasoningEffort` / `SetReasoningEffort`, stored as `reasoning_effort` in `config.json`) persists it; `New` applies a saved non-empty effort over whatever the agent was built with.
 - `DeviceCodePrompt(code, url)` — boxed auth prompt for device flows
 - `WebFlowPrompt(url)` — boxed auth prompt for web flows
 

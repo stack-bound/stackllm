@@ -34,8 +34,8 @@ type StepResult struct {
 // and/or Step calls may be in flight on the same Agent at once — each
 // Run works on a private copy of the agent's options, so events and
 // hooks never cross-wire between concurrent runs. The only exceptions
-// are SetProvider and SetModel, which mutate the Agent and must not be
-// called while any Run or Step is in progress.
+// are SetProvider, SetModel and SetReasoningEffort, which mutate the
+// Agent and must not be called while any Run or Step is in progress.
 type Agent struct {
 	provider provider.Provider
 	opts     options
@@ -63,6 +63,21 @@ func (a *Agent) SetProvider(p provider.Provider) { a.provider = p }
 // with Run or Step: the caller must ensure no Run or Step is in
 // progress (and none is started concurrently) when calling it.
 func (a *Agent) SetModel(model string) { a.opts.model = model }
+
+// SetReasoningEffort overrides the reasoning effort used on the next
+// Step/Run, as one of the provider.ReasoningEffort* levels. An empty
+// string clears the override so the provider's Config.ReasoningEffort
+// (or, failing that, the model's own default) applies again.
+//
+// SetReasoningEffort mutates the Agent and is NOT safe to call
+// concurrently with Run or Step: the caller must ensure no Run or Step
+// is in progress (and none is started concurrently) when calling it.
+func (a *Agent) SetReasoningEffort(effort string) { a.opts.reasoningEffort = effort }
+
+// ReasoningEffort returns the effort the agent will send on its next
+// Step/Run, as set by WithReasoningEffort or SetReasoningEffort. Empty
+// means the agent sends none and the provider or model default applies.
+func (a *Agent) ReasoningEffort() string { return a.opts.reasoningEffort }
 
 // Model returns the model name the agent will use on its next
 // Step/Run. It mirrors whatever the most recent New / SetModel call

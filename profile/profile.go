@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -639,6 +640,37 @@ func (m *Manager) TrackRecentModel(ctx context.Context, info ModelInfo) error {
 
 	if err := m.configStore.Save(cfg); err != nil {
 		return fmt.Errorf("profile: save recent model: %w", err)
+	}
+	_ = ctx // config is local
+	return nil
+}
+
+// ReasoningEffort returns the persisted reasoning effort, one of the
+// provider.ReasoningEffort* levels, or empty when the user has not
+// picked one (the model then keeps its own default).
+func (m *Manager) ReasoningEffort(ctx context.Context) (string, error) {
+	cfg, err := m.configStore.Load()
+	if err != nil {
+		return "", fmt.Errorf("profile: load config for reasoning effort: %w", err)
+	}
+	_ = ctx // config is local
+	return cfg.ReasoningEffort, nil
+}
+
+// SetReasoningEffort persists the reasoning effort so the next session
+// starts with it. effort must be one of provider.ReasoningEffortLevels,
+// or empty to clear the choice and go back to the model's default.
+func (m *Manager) SetReasoningEffort(ctx context.Context, effort string) error {
+	if effort != "" && !slices.Contains(provider.ReasoningEffortLevels(), effort) {
+		return fmt.Errorf("profile: unknown reasoning effort %q", effort)
+	}
+	cfg, err := m.configStore.Load()
+	if err != nil {
+		return fmt.Errorf("profile: load config for set reasoning effort: %w", err)
+	}
+	cfg.ReasoningEffort = effort
+	if err := m.configStore.Save(cfg); err != nil {
+		return fmt.Errorf("profile: save reasoning effort: %w", err)
 	}
 	_ = ctx // config is local
 	return nil

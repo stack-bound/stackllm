@@ -48,6 +48,11 @@ type Config struct {
 	// RecentModels is the most-recent-first list of models the user
 	// has selected. Capped to a small fixed size by the writer.
 	RecentModels []RecentModel `json:"recent_models,omitempty"`
+
+	// ReasoningEffort is the reasoning effort the user last picked, as
+	// one of the provider.ReasoningEffort* levels. Empty means none was
+	// picked and the model keeps its own default.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Store reads and writes Config to a JSON file.

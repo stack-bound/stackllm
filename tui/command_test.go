@@ -23,10 +23,11 @@ func TestFilterCommands(t *testing.T) {
 		{"prefix match", "/mo", []string{"/models"}},
 		{"case-insensitive", "/MODELS", []string{"/models"}},
 		{"substring without slash", "ses", []string{"/sessions"}},
-		{"substring mid-word", "ort", []string{"/export"}},
+		{"substring mid-word", "ort", []string{"/export", "/effort"}},
+		{"prefix match on new command", "/ef", []string{"/effort"}},
 		{"no match", "/zzz", nil},
-		{"slash-anchored substring", "/e", []string{"/export"}},
-		{"multi match", "e", []string{"/help", "/sessions", "/new", "/rename", "/delete", "/export", "/models"}},
+		{"slash-anchored substring", "/e", []string{"/export", "/effort"}},
+		{"multi match", "e", []string{"/help", "/sessions", "/new", "/rename", "/delete", "/export", "/models", "/effort"}},
 	}
 	for _, tc := range tests {
 		tc := tc

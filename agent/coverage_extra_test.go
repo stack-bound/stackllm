@@ -256,3 +256,72 @@ func TestWithReasoningEffort_ReachesWire(t *testing.T) {
 		})
 	}
 }
+
+// TestSetReasoningEffort_ChangesWireBetweenSteps pins the runtime
+// mutator the TUI's /effort command relies on: each Step sends whatever
+// SetReasoningEffort last set, and setting it back to empty drops the
+// field so the model's own default applies again.
+func TestSetReasoningEffort_ChangesWireBetweenSteps(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var bodies []map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Errorf("request body is not JSON: %v", err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := provider.New(provider.Config{
+		BaseURL:     srv.URL,
+		TokenSource: auth.NewStatic("test-key"),
+		Model:       "test-model",
+		MaxRetries:  1,
+	})
+	a := New(p, WithReasoningEffort(provider.ReasoningEffortLow))
+
+	steps := []struct {
+		set  bool
+		to   string
+		want string // "" means the field must be absent
+	}{
+		{want: provider.ReasoningEffortLow},
+		{set: true, to: provider.ReasoningEffortHigh, want: provider.ReasoningEffortHigh},
+		{set: true, to: "", want: ""},
+	}
+	for i, step := range steps {
+		if step.set {
+			a.SetReasoningEffort(step.to)
+		}
+		if got := a.ReasoningEffort(); got != step.want {
+			t.Errorf("step %d: ReasoningEffort() = %q, want %q", i, got, step.want)
+		}
+		if _, _, err := a.Step(context.Background(), []conversation.Message{userMessage("hi")}); err != nil {
+			t.Fatalf("step %d: Step: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != len(steps) {
+		t.Fatalf("backend saw %d requests, want %d", len(bodies), len(steps))
+	}
+	for i, step := range steps {
+		got, present := bodies[i]["reasoning_effort"]
+		switch {
+		case step.want == "" && present:
+			t.Errorf("request %d: reasoning_effort = %v, want absent", i, got)
+		case step.want != "" && got != step.want:
+			t.Errorf("request %d: reasoning_effort = %v, want %q", i, got, step.want)
+		}
+	}
+}

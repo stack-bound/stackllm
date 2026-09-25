@@ -35,6 +35,7 @@ const (
 	stateForkPicker
 	stateTextModal
 	stateConfirmModal
+	stateEffortPicker
 )
 
 // ModelLister is the subset of profile.Manager that the TUI needs to
@@ -113,6 +114,12 @@ type Model struct {
 	modelCursor      int
 	modelRecentCount int
 	modelLister      ModelLister
+
+	// Reasoning effort picker state. The effort itself lives on the
+	// agent; effortStore, when set, persists it across runs.
+	effortChoices []effortChoice
+	effortCursor  int
+	effortStore   EffortStore
 
 	// Session picker state.
 	sessions             []*session.Session
@@ -235,6 +242,7 @@ func New(a *agent.Agent, store session.SessionStore, opts ...Option) *Model {
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.applyStoredEffort()
 	return m
 }
 
@@ -272,6 +280,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stateModelPicker:
 				m.state = stateIdle
 				skipTextarea = true
+			case stateEffortPicker:
+				m.closeEffortPicker()
+				skipTextarea = true
 			case stateModelLoading:
 				// allow cancel of loading by returning to idle
 				m.state = stateIdle
@@ -306,6 +317,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				skipTextarea = true
 			}
+			if m.state == stateEffortPicker {
+				if m.effortCursor > 0 {
+					m.effortCursor--
+				}
+				skipTextarea = true
+			}
 			if m.state == stateSessionPicker {
 				if m.sessionCursor > 0 {
 					m.sessionCursor--
@@ -328,6 +345,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == stateModelPicker {
 				if m.modelCursor < len(m.models)-1 {
 					m.modelCursor++
+				}
+				skipTextarea = true
+			}
+			if m.state == stateEffortPicker {
+				if m.effortCursor < len(m.effortChoices)-1 {
+					m.effortCursor++
 				}
 				skipTextarea = true
 			}
@@ -402,6 +425,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateModelLoading
 					cmds = append(cmds, m.switchModel(selected))
 				}
+			case stateEffortPicker:
+				m.selectEffort()
 			case stateSessionPicker:
 				if len(m.sessions) > 0 {
 					selected := m.sessions[m.sessionCursor]
@@ -682,6 +707,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !skipTextarea &&
 		m.state != stateModelPicker &&
 		m.state != stateModelLoading &&
+		m.state != stateEffortPicker &&
 		m.state != stateSessionPicker &&
 		m.state != stateSessionLoading &&
 		m.state != stateForkPicker {
@@ -740,6 +766,8 @@ func (m *Model) View() string {
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● command")
 	case stateModelPicker:
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a model")
+	case stateEffortPicker:
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select reasoning effort")
 	case stateSessionPicker:
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● select a session")
 	case stateForkPicker:
@@ -750,7 +778,11 @@ func (m *Model) View() string {
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("● ready")
 	}
 
-	suffix := formatModelStatus(m.currentModel, m.session.LastUsage, m.contextWindow)
+	model := m.currentModel
+	if effort := m.agent.ReasoningEffort(); effort != "" && model != "" {
+		model += " · effort " + effort
+	}
+	suffix := formatModelStatus(model, m.session.LastUsage, m.contextWindow)
 	if suffix != "" {
 		suffix = statusSuffixStyle.Render(suffix)
 	}
@@ -772,6 +804,8 @@ func (m *Model) renderMenu() string {
 		return m.renderCommandMenu()
 	case stateModelPicker:
 		return m.renderModelPicker()
+	case stateEffortPicker:
+		return m.renderEffortPicker()
 	case stateSessionPicker:
 		return m.renderSessionPicker()
 	case stateForkPicker:
@@ -912,6 +946,8 @@ func (m *Model) executeCommand(c Command) tea.Cmd {
 		}
 		m.state = stateModelLoading
 		return m.loadModels()
+	case CommandEffort:
+		return m.openEffortPicker()
 	case CommandNew:
 		m.executeNewSession()
 		m.state = stateIdle
@@ -1092,6 +1128,9 @@ func (m *Model) runAgent() tea.Cmd {
 				}
 				m.err = ev.Err
 				m.appendOutput(m.errorStyle.Render("Error: "+ev.Err.Error()) + "\n")
+				if hint := m.effortErrorHint(ev.Err); hint != "" {
+					m.appendOutput(m.toolStyle.Render(hint) + "\n")
+				}
 			}
 		}
 

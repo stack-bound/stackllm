@@ -67,7 +67,9 @@ func main() {
 	}
 	defer store.Close()
 
-	m := tui.New(a, store, tui.WithModelLister(mgr))
+	// WithEffortStore restores the reasoning effort picked with /effort
+	// last time and saves each new choice to the stackllm config.
+	m := tui.New(a, store, tui.WithModelLister(mgr), tui.WithEffortStore(mgr))
 
 	prog := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := prog.Run(); err != nil {

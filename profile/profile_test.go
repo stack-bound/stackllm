@@ -1761,3 +1761,91 @@ func TestIsGroqAudioModel(t *testing.T) {
 		}
 	}
 }
+
+// TestReasoningEffort_RoundTrip verifies the effort survives a fresh
+// Manager reading the same config file (a TUI restart), that clearing it
+// goes back to empty, and that saving it leaves the rest of the config
+// intact.
+func TestReasoningEffort_RoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mgr, as, cs := testManager(t)
+
+	got, err := mgr.ReasoningEffort(ctx)
+	if err != nil {
+		t.Fatalf("ReasoningEffort (empty): %v", err)
+	}
+	if got != "" {
+		t.Errorf("initial ReasoningEffort = %q, want empty", got)
+	}
+
+	if err := mgr.SetDefaultModel(ModelInfo{Provider: "openai", Model: "gpt-5.4"}); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	if err := mgr.SetReasoningEffort(ctx, provider.ReasoningEffortHigh); err != nil {
+		t.Fatalf("SetReasoningEffort: %v", err)
+	}
+
+	// A second Manager over the same stores stands in for a restart.
+	restarted := New(WithAuthStore(as), WithConfigStore(cs))
+	got, err = restarted.ReasoningEffort(ctx)
+	if err != nil {
+		t.Fatalf("ReasoningEffort after restart: %v", err)
+	}
+	if got != provider.ReasoningEffortHigh {
+		t.Errorf("ReasoningEffort after restart = %q, want %q", got, provider.ReasoningEffortHigh)
+	}
+	cfg, err := cs.Load()
+	if err != nil {
+		t.Fatalf("config Load: %v", err)
+	}
+	if cfg.DefaultProvider != "openai" || cfg.DefaultModel != "gpt-5.4" {
+		t.Errorf("default model clobbered: %s/%s", cfg.DefaultProvider, cfg.DefaultModel)
+	}
+
+	if err := restarted.SetReasoningEffort(ctx, ""); err != nil {
+		t.Fatalf("SetReasoningEffort(empty): %v", err)
+	}
+	if got, _ := mgr.ReasoningEffort(ctx); got != "" {
+		t.Errorf("ReasoningEffort after clearing = %q, want empty", got)
+	}
+}
+
+func TestSetReasoningEffort_Errors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("unknown level is rejected and not saved", func(t *testing.T) {
+		t.Parallel()
+		mgr, _, _ := testManager(t)
+		if err := mgr.SetReasoningEffort(ctx, provider.ReasoningEffortLow); err != nil {
+			t.Fatalf("SetReasoningEffort(low): %v", err)
+		}
+		if err := mgr.SetReasoningEffort(ctx, "hgih"); err == nil {
+			t.Fatal("expected an error for an unknown level")
+		}
+		if got, _ := mgr.ReasoningEffort(ctx); got != provider.ReasoningEffortLow {
+			t.Errorf("ReasoningEffort after rejected set = %q, want %q", got, provider.ReasoningEffortLow)
+		}
+	})
+
+	t.Run("config load error", func(t *testing.T) {
+		t.Parallel()
+		mgr := corruptConfigManager(t)
+		if err := mgr.SetReasoningEffort(ctx, provider.ReasoningEffortLow); err == nil {
+			t.Error("expected load error from SetReasoningEffort")
+		}
+		if _, err := mgr.ReasoningEffort(ctx); err == nil {
+			t.Error("expected load error from ReasoningEffort")
+		}
+	})
+
+	t.Run("config save error", func(t *testing.T) {
+		t.Parallel()
+		mgr := unsavableConfigManager(t)
+		if err := mgr.SetReasoningEffort(ctx, provider.ReasoningEffortLow); err == nil {
+			t.Error("expected save error")
+		}
+	})
+}
